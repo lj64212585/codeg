@@ -30,10 +30,20 @@ pnpm build                     # 静态导出构建
 
 ### 后端 Rust（在 `src-tauri/` 目录下执行）
 
+# Windows 本机验证（与 CI 行为一致）
+# 桌面测试二进制只做编译覆盖；实际用例由 server 配置执行。
+# 本机页面文件不足时保持单任务，避免并行 rustc 耗尽虚拟内存。
+```powershell
+$env:CARGO_BUILD_JOBS = "1"
+cargo check
+cargo test --features test-utils --no-run
+cargo test --no-default-features --bin codeg-server --lib
+```
+
 ```bash
 # 桌面模式（默认 feature）
 cargo check
-cargo test --features test-utils
+cargo test --features test-utils        # Linux / macOS；Windows 使用上面的 --no-run
 cargo clippy --all-targets --features test-utils -- -D warnings
 
 # 服务器模式
