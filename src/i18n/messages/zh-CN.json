@@ -1740,6 +1740,7 @@
     "conversationCard": {
       "untitledConversation": "未命名会话",
       "newConversation": "新建会话",
+      "attachToCurrentSession": "添加到会话",
       "rename": "重命名",
       "status": "状态",
       "delete": "删除",
@@ -2696,6 +2697,7 @@
         "slashCommands": "斜杠命令",
         "slashSearchPlaceholder": "搜索命令...",
         "slashSearchEmpty": "没有匹配的命令",
+        "slashLoading": "正在加载命令…",
         "experts": "专家",
         "office": "日常办公",
         "research": "科学研究",

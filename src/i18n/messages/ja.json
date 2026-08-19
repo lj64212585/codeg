@@ -1740,6 +1740,7 @@
     "conversationCard": {
       "untitledConversation": "無題の会話",
       "newConversation": "新しい会話",
+      "attachToCurrentSession": "セッションに追加",
       "rename": "名前を変更",
       "status": "ステータス",
       "delete": "削除",
@@ -2694,6 +2695,7 @@
         "slashCommands": "スラッシュコマンド",
         "slashSearchPlaceholder": "コマンドを検索...",
         "slashSearchEmpty": "一致するコマンドがありません",
+        "slashLoading": "コマンドを読み込み中…",
         "experts": "エキスパート",
         "office": "日常業務",
         "research": "科学研究",

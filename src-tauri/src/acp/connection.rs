@@ -3314,9 +3314,18 @@ fn load_mcp_servers_for_agent(agent_type: AgentType) -> Vec<McpServer> {
     // DeepSeek is deliberately NOT in this set: deepseek-acp reads no MCP file
     // at all, so `$DSH_HOME/mcp.json` (codeg's own store) reaches it ONLY
     // through the wire — skipping it would silently drop every user server.
+    //
+    // Qoder joins the skip set: the CLI reads `mcpServers` out of its own
+    // `~/.qoder/settings.json` (gemini-schema settings file) at startup, which
+    // codeg's MCP settings UI manages directly — forwarding the same servers
+    // over the wire would double-mount them.
     if matches!(
         agent_type,
-        AgentType::Hermes | AgentType::KimiCode | AgentType::Grok | AgentType::Cursor
+        AgentType::Hermes
+            | AgentType::KimiCode
+            | AgentType::Grok
+            | AgentType::Cursor
+            | AgentType::Qoder
     ) {
         return Vec::new();
     }

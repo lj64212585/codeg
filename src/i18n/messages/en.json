@@ -1740,6 +1740,7 @@
     "conversationCard": {
       "untitledConversation": "Untitled conversation",
       "newConversation": "New Conversation",
+      "attachToCurrentSession": "Add to session",
       "rename": "Rename",
       "status": "Status",
       "delete": "Delete",
@@ -2696,6 +2697,7 @@
         "slashCommands": "Slash commands",
         "slashSearchPlaceholder": "Search commands...",
         "slashSearchEmpty": "No matching commands",
+        "slashLoading": "Loading commands…",
         "experts": "Experts",
         "office": "Office Work",
         "research": "Scientific Research",
