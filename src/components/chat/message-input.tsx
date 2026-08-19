@@ -360,6 +360,7 @@ export function MessageInput({
   const menuShortcuts = useComposerShortcuts({
     editorRef,
     agentType: agentType ?? null,
+    workspacePath: defaultPath ?? null,
     onAfterInsert: syncComposerEmpty,
     logLabel: "MessageInput",
   })
