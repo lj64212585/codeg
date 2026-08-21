@@ -735,7 +735,7 @@ impl BrowserRuntimeManager {
     }
 
     async fn spawn_sidecar(&self) -> Result<(), BrowserRuntimeError> {
-        let executable = locate_sidecar().ok_or_else(|| {
+        let executable = locate_sidecar().ok_or({
             if cfg!(windows) {
                 BrowserRuntimeError::NotInstalled
             } else {
