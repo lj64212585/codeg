@@ -5435,6 +5435,10 @@ pub(crate) fn pi_project_trust_launch_block(
 ) -> Option<String> {
     let trust_file = pi_agent_dir_for_env(runtime_env).join("trust.json");
     let state = pi_project_trust_state_at(&trust_file, &pi_trust_ack_path(), cwd);
+    pi_project_trust_launch_block_for_state(&state)
+}
+
+fn pi_project_trust_launch_block_for_state(state: &PiProjectTrustState) -> Option<String> {
     if state.resources.is_empty() || state.decision != Some(true) || state.acknowledged {
         return None;
     }
@@ -13362,17 +13366,16 @@ mod tests {
         pi_canonical_path(dir).to_string_lossy().to_string()
     }
 
-    /// A `runtime_env` whose `PI_CODING_AGENT_DIR` points at `agent_dir`, so the
-    /// launch gate reads a tempdir's `trust.json` instead of `~/.pi/agent`.
-    fn pi_env_for(agent_dir: &Path) -> BTreeMap<String, String> {
-        BTreeMap::from([(
-            "PI_CODING_AGENT_DIR".to_string(),
-            agent_dir.to_string_lossy().to_string(),
-        )])
+    fn fixture_resources(cwd: &Path, fixture_root: &Path) -> Vec<PiProjectResource> {
+        let root = pi_canonical_path(fixture_root);
+        pi_project_trust_resources(cwd)
+            .into_iter()
+            .filter(|resource| Path::new(&resource.path).starts_with(&root))
+            .collect()
     }
 
-    fn resource_kinds(cwd: &Path) -> Vec<String> {
-        pi_project_trust_resources(cwd)
+    fn resource_kinds(cwd: &Path, fixture_root: &Path) -> Vec<String> {
+        fixture_resources(cwd, fixture_root)
             .into_iter()
             .map(|r| r.kind)
             .collect()
@@ -13394,7 +13397,7 @@ mod tests {
             }
 
             assert_eq!(
-                resource_kinds(&ws),
+                resource_kinds(&ws, tmp.path()),
                 vec![format!(".pi/{entry}")],
                 "`.pi/{entry}` must be reported as a trust-gated resource",
             );
@@ -13413,7 +13416,7 @@ mod tests {
         touch(&ws.join(".pi").join("settings.json"));
         fs::create_dir_all(ws.join(".pi").join("prompts")).unwrap();
 
-        let by_kind = pi_project_trust_resources(&ws)
+        let by_kind = fixture_resources(&ws, tmp.path())
             .into_iter()
             .map(|r| (r.kind, r.executes_code))
             .collect::<BTreeMap<_, _>>();
@@ -13431,7 +13434,7 @@ mod tests {
         let ws = tmp.path().join("ws");
         fs::create_dir_all(ws.join(".pi")).unwrap();
 
-        assert!(pi_project_trust_resources(&ws).is_empty());
+        assert!(resource_kinds(&ws, tmp.path()).is_empty());
     }
 
     /// pi walks ancestors for `.agents/skills`, so a parent directory's store is
@@ -13444,7 +13447,10 @@ mod tests {
         fs::create_dir_all(&ws).unwrap();
         fs::create_dir_all(parent.join(".agents").join("skills")).unwrap();
 
-        assert_eq!(resource_kinds(&ws), vec![".agents/skills".to_string()]);
+        assert_eq!(
+            resource_kinds(&ws, tmp.path()),
+            vec![".agents/skills".to_string()]
+        );
     }
 
     /// `~/.agents/skills` is the USER's own store, not a repo's — pi excludes it
@@ -13608,14 +13614,18 @@ mod tests {
         assert!(!trust.exists());
     }
 
-    /// Drive the launch gate with an isolated pi agent dir AND an isolated codeg
-    /// home (the acknowledgement store lives there, via `CODEG_HOME`).
+    /// Drive the launch gate with isolated trust/ack files. Resource assertions
+    /// are scoped to the fixture so the machine's own ancestor stores cannot
+    /// change a tempdir test's result.
     fn launch_block_for(agent_dir: &Path, codeg_home: &Path, cwd: &Path) -> Option<String> {
-        temp_env::with_var(
-            "CODEG_HOME",
-            Some(codeg_home.to_string_lossy().to_string()),
-            || pi_project_trust_launch_block(cwd, &pi_env_for(agent_dir)),
-        )
+        let fixture_root = agent_dir.parent().expect("fixture root");
+        let mut state = pi_project_trust_state_at(
+            &agent_dir.join("trust.json"),
+            &codeg_home.join("pi-project-trust-ack.json"),
+            cwd,
+        );
+        state.resources = fixture_resources(cwd, fixture_root);
+        pi_project_trust_launch_block_for_state(&state)
     }
 
     /// Build a workspace shipping `.pi/extensions`, with `trust.json` saying what
@@ -13884,7 +13894,8 @@ mod tests {
         fs::create_dir_all(ws.join(".pi").join("extensions")).unwrap();
         let trust = tmp.path().join("trust.json");
 
-        let state = pi_project_trust_state_at(&trust, &tmp.path().join("ack.json"), &ws);
+        let mut state = pi_project_trust_state_at(&trust, &tmp.path().join("ack.json"), &ws);
+        state.resources = fixture_resources(&ws, tmp.path());
 
         assert_eq!(state.decision, None, "nobody has decided yet");
         assert_eq!(state.decided_at, None);
