@@ -166,6 +166,24 @@ async function createSurfaceServer() {
   return { backend, token, url: `http://127.0.0.1:${port}` }
 }
 
+async function postMcp(
+  url: string,
+  token: string,
+  sessionId: string,
+  body: Record<string, unknown>
+) {
+  return await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json, text/event-stream",
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "X-Codeg-Browser-Session": sessionId,
+    },
+    body: JSON.stringify(body),
+  })
+}
+
 describe("BrowserSidecarServer", () => {
   it("rejects requests without the private bearer token", async () => {
     const { url } = await createTestServer()
@@ -219,6 +237,91 @@ describe("BrowserSidecarServer", () => {
         text: expect.stringContaining('"state":"stopped"'),
       }),
     ])
+  })
+
+  it("accepts a tool call when the Agent client does not retain MCP initialization state", async () => {
+    const { token, url } = await createTestServer()
+    const response = await postMcp(url, token, "session-a", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "runtime.status", arguments: {} },
+    })
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: expect.stringContaining('"state":"stopped"'),
+          },
+        ],
+      },
+    })
+  })
+
+  it("keeps MCP tools usable after releasing Browser resources for a live Agent", async () => {
+    const { token, url } = await createTestServer()
+    const client = new Client({ name: "test-client", version: "1" })
+    clients.push(client)
+    const transport = new StreamableHTTPClientTransport(new URL(`${url}/mcp`), {
+      requestInit: {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "X-Codeg-Browser-Session": "session-a",
+        },
+      },
+    })
+    await client.connect(transport)
+
+    const released = await fetch(`${url}/admin/release-session`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ sessionId: "session-a" }),
+    })
+    expect(released.status).toBe(200)
+
+    const result = await client.callTool({
+      name: "runtime.status",
+      arguments: {},
+    })
+    expect(result.isError).toBe(false)
+    expect(result.content).toEqual([
+      expect.objectContaining({
+        type: "text",
+        text: expect.stringContaining('"state":"stopped"'),
+      }),
+    ])
+  })
+
+  it("handles concurrent first tool calls for the same Agent session", async () => {
+    const { token, url } = await createTestServer()
+    const responses = await Promise.all(
+      [1, 2, 3].map((id) =>
+        postMcp(url, token, "session-a", {
+          jsonrpc: "2.0",
+          id,
+          method: "tools/call",
+          params: { name: "runtime.status", arguments: {} },
+        })
+      )
+    )
+
+    expect(responses.map((response) => response.status)).toEqual([
+      200, 200, 200,
+    ])
+    const bodies = await Promise.all(
+      responses.map((response) => response.json())
+    )
+    expect(bodies.map((body) => body.id)).toEqual([1, 2, 3])
+    expect(bodies.every((body) => body.result?.isError === false)).toBe(true)
   })
 
   it("serves a complete per-session surface snapshot and releases all targets", async () => {

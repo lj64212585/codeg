@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from "node:crypto"
+import { timingSafeEqual } from "node:crypto"
 import {
   createServer,
   type IncomingMessage,
@@ -30,7 +30,7 @@ export interface BrowserSidecarServerOptions {
   onControlEvent?: (event: Record<string, unknown>) => void
 }
 
-interface McpSession {
+interface McpRequestContext {
   server: Server
   transport: WebStandardStreamableHTTPServerTransport
 }
@@ -47,7 +47,6 @@ const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,256}$/
 export class BrowserSidecarServer {
   private httpServer: HttpServer | null = null
   private portValue: number | null = null
-  private readonly mcpSessions = new Map<string, McpSession>()
   private readonly auditEntries: AuditEntry[] = []
   private readonly surfaceStreams = new Set<ServerResponse>()
 
@@ -89,9 +88,6 @@ export class BrowserSidecarServer {
   }
 
   async stop(): Promise<void> {
-    for (const [sessionId] of this.mcpSessions) {
-      await this.releaseMcpSession(sessionId)
-    }
     await this.options.runtime.shutdown()
     for (const response of this.surfaceStreams) response.end()
     this.surfaceStreams.clear()
@@ -169,7 +165,7 @@ export class BrowserSidecarServer {
       return
     }
     const body = await readJsonBody(request)
-    const session = await this.getMcpSession(sessionId)
+    const session = await this.createMcpRequestContext(sessionId)
     const headers = new Headers()
     for (const [name, value] of Object.entries(request.headers)) {
       if (Array.isArray(value)) {
@@ -186,10 +182,14 @@ export class BrowserSidecarServer {
         body: JSON.stringify(body),
       }
     )
-    const webResponse = await session.transport.handleRequest(webRequest, {
-      parsedBody: body,
-    })
-    await writeWebResponse(response, webResponse)
+    try {
+      const webResponse = await session.transport.handleRequest(webRequest, {
+        parsedBody: body,
+      })
+      await writeWebResponse(response, webResponse)
+    } finally {
+      await session.server.close().catch(() => undefined)
+    }
   }
 
   private async handleAdmin(
@@ -226,7 +226,7 @@ export class BrowserSidecarServer {
         this.json(response, 400, { error: "invalid_agent_session" })
         return
       }
-      await this.releaseMcpSession(sessionId)
+      await this.options.runtime.releaseSession(sessionId)
       this.audit("session_released")
       this.json(response, 200, { ok: true })
       return
@@ -310,10 +310,9 @@ export class BrowserSidecarServer {
     response.once("close", close)
   }
 
-  private async getMcpSession(sessionId: string): Promise<McpSession> {
-    const existing = this.mcpSessions.get(sessionId)
-    if (existing) return existing
-
+  private async createMcpRequestContext(
+    sessionId: string
+  ): Promise<McpRequestContext> {
     const server = new Server(
       { name: "codeg-browser", version: "0.1.0" },
       { capabilities: { tools: {} } }
@@ -358,21 +357,16 @@ export class BrowserSidecarServer {
     })
 
     const transport = new WebStandardStreamableHTTPServerTransport({
-      sessionIdGenerator: randomUUID,
+      // X-Codeg-Browser-Session is the authoritative application session.
+      // Keeping a second stateful MCP session here made an explicit Browser
+      // resource release invalidate a still-live Agent's transport. Stateless
+      // JSON requests also tolerate clients that do not retain MCP initialization
+      // state, while Browser tab/download ownership remains scoped above.
+      sessionIdGenerator: undefined,
       enableJsonResponse: true,
     })
     await server.connect(transport)
-    const created = { server, transport }
-    this.mcpSessions.set(sessionId, created)
-    return created
-  }
-
-  private async releaseMcpSession(sessionId: string): Promise<void> {
-    const session = this.mcpSessions.get(sessionId)
-    this.mcpSessions.delete(sessionId)
-    await this.options.runtime.releaseSession(sessionId)
-    await session?.transport.close().catch(() => undefined)
-    await session?.server.close().catch(() => undefined)
+    return { server, transport }
   }
 
   private readSessionId(request: IncomingMessage): string | null {

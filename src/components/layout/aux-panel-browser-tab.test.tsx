@@ -23,6 +23,7 @@ vi.mock("next-intl", () => ({
 
 import { AuxPanelBrowserTab, browserFramePoint } from "./aux-panel-browser-tab"
 import type {
+  BrowserSurfaceAction,
   BrowserSurfaceEvent,
   BrowserSurfaceSnapshot,
 } from "@/lib/browser-surface"
@@ -196,6 +197,168 @@ describe("AuxPanelBrowserTab", () => {
     expect(screen.getByRole("application").querySelector("img")).toHaveClass(
       "object-contain"
     )
+  })
+
+  it("forwards pointer movement through the fitted frame", async () => {
+    render(<AuxPanelBrowserTab visible onExplicitClose={() => undefined} />)
+    await screen.findByText("One")
+    act(() => {
+      emit?.({
+        type: "frame",
+        frame: {
+          targetId: "t1",
+          data: "AA==",
+          mimeType: "image/jpeg",
+          deviceWidth: 320,
+          deviceHeight: 200,
+          pageScaleFactor: 1,
+        },
+      })
+    })
+
+    const page = screen.getByRole("application")
+    vi.spyOn(page, "getBoundingClientRect").mockReturnValue({
+      width: 320,
+      height: 200,
+      top: 0,
+      right: 320,
+      bottom: 200,
+      left: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    })
+    fireEvent(
+      page,
+      new MouseEvent("pointermove", {
+        bubbles: true,
+        clientX: 40,
+        clientY: 60,
+      })
+    )
+
+    await waitFor(() => {
+      expect(surface.runBrowserSurfaceAction).toHaveBeenCalledWith(
+        "connection-a",
+        {
+          action: "input",
+          input: {
+            kind: "mouse",
+            event: "moved",
+            x: 40,
+            y: 60,
+            button: "none",
+            modifiers: 0,
+          },
+        }
+      )
+    })
+  })
+
+  it("refreshes the pointer position before pressing", async () => {
+    render(<AuxPanelBrowserTab visible onExplicitClose={() => undefined} />)
+    await screen.findByText("One")
+    act(() => {
+      emit?.({
+        type: "frame",
+        frame: {
+          targetId: "t1",
+          data: "AA==",
+          mimeType: "image/jpeg",
+          deviceWidth: 320,
+          deviceHeight: 200,
+          pageScaleFactor: 1,
+        },
+      })
+    })
+
+    const page = screen.getByRole("application")
+    vi.spyOn(page, "getBoundingClientRect").mockReturnValue({
+      width: 320,
+      height: 200,
+      top: 0,
+      right: 320,
+      bottom: 200,
+      left: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    })
+    let resolveMoved: ((value: BrowserSurfaceSnapshot) => void) | undefined
+    surface.runBrowserSurfaceAction.mockImplementation(
+      async (_connectionId: string, action: BrowserSurfaceAction) => {
+        if (
+          action.action !== "input" ||
+          action.input.kind !== "mouse" ||
+          action.input.event !== "moved"
+        ) {
+          return snapshot
+        }
+        return await new Promise<BrowserSurfaceSnapshot>((resolve) => {
+          resolveMoved = resolve
+        })
+      }
+    )
+    fireEvent(
+      page,
+      new MouseEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        clientX: 140,
+        clientY: 160,
+      })
+    )
+
+    await waitFor(() => {
+      const inputActions = surface.runBrowserSurfaceAction.mock.calls
+        .map(([, action]) => action)
+        .filter((action) => action.action === "input")
+      expect(inputActions).toEqual([
+        {
+          action: "input",
+          input: {
+            kind: "mouse",
+            event: "moved",
+            x: 140,
+            y: 160,
+            button: "none",
+            modifiers: 0,
+          },
+        },
+      ])
+    })
+
+    act(() => resolveMoved?.(snapshot))
+
+    await waitFor(() => {
+      const inputActions = surface.runBrowserSurfaceAction.mock.calls
+        .map(([, action]) => action)
+        .filter((action) => action.action === "input")
+      expect(inputActions).toEqual([
+        {
+          action: "input",
+          input: {
+            kind: "mouse",
+            event: "moved",
+            x: 140,
+            y: 160,
+            button: "none",
+            modifiers: 0,
+          },
+        },
+        {
+          action: "input",
+          input: {
+            kind: "mouse",
+            event: "pressed",
+            x: 140,
+            y: 160,
+            button: "left",
+            modifiers: 0,
+          },
+        },
+      ])
+    })
   })
 
   it.each([
