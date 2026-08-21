@@ -16,6 +16,7 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     "src-tauri/target/**",
     "src-tauri/experts/**",
+    "packages/*/dist/**",
     "public/vs/**",
     // Gitignored scratch space for planning/review docs and one-off probe
     // scripts. Prettier already skips it — its `--ignore-path` defaults to

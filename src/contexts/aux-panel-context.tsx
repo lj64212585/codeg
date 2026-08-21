@@ -16,14 +16,17 @@ import {
 import { useActiveFolder } from "@/contexts/active-folder-context"
 import { detectPlatform } from "@/hooks/use-platform"
 import { isDesktop } from "@/lib/platform"
+import { subscribe } from "@/lib/platform"
 
 export type AuxPanelTab =
   | "session_details"
   | "file_tree"
   | "changes"
   | "git_log"
+  | "browser"
 
 const STORAGE_KEY = "workspace:right-sidebar"
+const BROWSER_SESSIONS_STORAGE_KEY = "workspace:right-sidebar:browser-sessions"
 
 const DEFAULT_WIDTH = 320
 const MIN_WIDTH = 200
@@ -59,6 +62,8 @@ interface AuxPanelContextValue {
   pendingRevealPath: string | null
   revealInFileTree: (path: string) => void
   consumePendingRevealPath: () => void
+  browserSessionIds: ReadonlySet<string>
+  setBrowserSessionOpen: (connectionId: string, open: boolean) => void
 }
 
 const AuxPanelContext = createContext<AuxPanelContextValue | null>(null)
@@ -89,6 +94,9 @@ export function AuxPanelProvider({ children }: AuxPanelProviderProps) {
   const [pendingRevealPath, setPendingRevealPath] = useState<string | null>(
     null
   )
+  const [browserSessionIds, setBrowserSessionIds] = useState<Set<string>>(
+    () => new Set()
+  )
   // Platform-derived minimum (see resolveAuxMinWidth); stable for the session.
   const minWidth = useMemo(() => resolveAuxMinWidth(), [])
 
@@ -118,6 +126,27 @@ export function AuxPanelProvider({ children }: AuxPanelProviderProps) {
     setPendingRevealPath(null)
   }, [])
 
+  const setBrowserSessionOpen = useCallback(
+    (connectionId: string, open: boolean) => {
+      setBrowserSessionIds((current) => {
+        if (current.has(connectionId) === open) return current
+        const next = new Set(current)
+        if (open) next.add(connectionId)
+        else next.delete(connectionId)
+        try {
+          localStorage.setItem(
+            BROWSER_SESSIONS_STORAGE_KEY,
+            JSON.stringify([...next].slice(-100))
+          )
+        } catch {
+          // Private mode or storage quota: the Tauri registry remains authoritative.
+        }
+        return next
+      })
+    },
+    []
+  )
+
   useEffect(() => {
     const stored = loadPersistedPanelState(storageKey)
     const isMobileViewport = window.innerWidth < 768
@@ -126,6 +155,26 @@ export function AuxPanelProvider({ children }: AuxPanelProviderProps) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsOpen(isMobileViewport ? false : (stored?.isOpen ?? defaultOpen))
     setWidthState(clampWidth(stored?.width ?? DEFAULT_WIDTH, minWidth))
+    try {
+      const parsed = JSON.parse(
+        localStorage.getItem(BROWSER_SESSIONS_STORAGE_KEY) ?? "[]"
+      ) as unknown
+      if (Array.isArray(parsed)) {
+        setBrowserSessionIds(
+          new Set(
+            parsed.filter(
+              (value): value is string =>
+                typeof value === "string" &&
+                value.length > 0 &&
+                value.length <= 256 &&
+                /^[A-Za-z0-9._:-]+$/.test(value)
+            )
+          )
+        )
+      }
+    } catch {
+      setBrowserSessionIds(new Set())
+    }
     setRestored(true)
   }, [storageKey, minWidth])
 
@@ -133,6 +182,24 @@ export function AuxPanelProvider({ children }: AuxPanelProviderProps) {
     if (!restored) return
     savePersistedPanelState(storageKey, { isOpen, width })
   }, [isOpen, restored, storageKey, width])
+
+  useEffect(() => {
+    let disposed = false
+    let unsubscribe: (() => void) | null = null
+    void subscribe<{ connectionId: string }>(
+      "browser://session-activity",
+      ({ connectionId }) => {
+        if (!disposed) setBrowserSessionOpen(connectionId, true)
+      }
+    ).then((next) => {
+      if (disposed) next()
+      else unsubscribe = next
+    })
+    return () => {
+      disposed = true
+      unsubscribe?.()
+    }
+  }, [setBrowserSessionOpen])
 
   // Reset pending reveal path when the active folder changes; file tree
   // state is content-driven by the workspace contexts and will refetch
@@ -158,6 +225,8 @@ export function AuxPanelProvider({ children }: AuxPanelProviderProps) {
       pendingRevealPath,
       revealInFileTree,
       consumePendingRevealPath,
+      browserSessionIds,
+      setBrowserSessionOpen,
     }),
     [
       isOpen,
@@ -172,6 +241,8 @@ export function AuxPanelProvider({ children }: AuxPanelProviderProps) {
       pendingRevealPath,
       revealInFileTree,
       consumePendingRevealPath,
+      browserSessionIds,
+      setBrowserSessionOpen,
     ]
   )
 

@@ -4969,3 +4969,86 @@ export async function workTaskLookupBySource(
 ): Promise<ForgeTaskLink[]> {
   return getTransport().call("work_task_lookup_by_source", { sourceKeys })
 }
+
+// --- Managed Browser MCP runtime (local Windows desktop only) ---
+
+export type BrowserRuntimeState =
+  | "not_installed"
+  | "stopped"
+  | "starting"
+  | "ready"
+  | "error"
+  | "recovering"
+
+export interface BrowserRuntimeSettings {
+  enabled: boolean
+  autoStart: boolean
+  browserPath: string | null
+  backend: "embedded" | "external"
+}
+
+export interface BrowserRuntimeLogEntry {
+  at: string
+  code: string
+}
+
+export interface BrowserRuntimeStatus {
+  state: BrowserRuntimeState
+  installed: boolean
+  enabled: boolean
+  autoStart: boolean
+  browserPath: string | null
+  sidecarPid: number | null
+  browserPid: number | null
+  runtimeVersion: string | null
+  backend: string
+  browserName: string | null
+  browserVersion: string | null
+  profilePath: string
+  downloadPath: string
+  recoveryAttempt: number
+  lastErrorCode: string | null
+  recentLogs: BrowserRuntimeLogEntry[]
+}
+
+export function getBrowserRuntimeStatus(): Promise<BrowserRuntimeStatus> {
+  return getTransport().call("browser_get_status")
+}
+
+export function getBrowserRuntimeSettings(): Promise<BrowserRuntimeSettings> {
+  return getTransport().call("browser_get_settings")
+}
+
+export function updateBrowserRuntimeSettings(
+  settings: BrowserRuntimeSettings
+): Promise<BrowserRuntimeSettings> {
+  return getTransport().call("browser_update_settings", { settings })
+}
+
+export function startBrowserRuntime(): Promise<BrowserRuntimeStatus> {
+  return getTransport().call("browser_start")
+}
+
+export function stopBrowserRuntime(): Promise<BrowserRuntimeStatus> {
+  return getTransport().call("browser_stop")
+}
+
+export function restartBrowserRuntime(): Promise<BrowserRuntimeStatus> {
+  return getTransport().call("browser_restart")
+}
+
+export function recoverBrowserRuntime(): Promise<BrowserRuntimeStatus> {
+  return getTransport().call("browser_recover")
+}
+
+export function doctorBrowserRuntime(): Promise<unknown> {
+  return getTransport().call("browser_doctor")
+}
+
+export function getBrowserRuntimeDiagnostics(): Promise<unknown> {
+  return getTransport().call("browser_get_diagnostics")
+}
+
+export function testBrowserRuntimeConnection(): Promise<unknown> {
+  return getTransport().call("browser_test_connection")
+}

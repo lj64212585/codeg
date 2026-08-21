@@ -76,9 +76,11 @@ import { DelegationStatusCard } from "./delegation-status-card"
 import { DelegationStatusGroupCard } from "./delegation-status-group-card"
 import { BackgroundTaskCard } from "./background-task-card"
 import { GeneratedImagesBlock } from "./generated-images-block"
+import { BrowserToolCard } from "./browser-tool-card"
 import { GoalRunPart, GoalToolCallPart } from "./goal-tool-call"
 import { PlanCard, PlanEntriesList } from "./plan-card"
 import { PlanModeCard } from "./plan-mode-card"
+import { browserToolNameFromCall } from "@/lib/browser-tool"
 import { PlainTextWithBadges } from "./plain-text-with-badges"
 import {
   FileTextIcon,
@@ -2573,6 +2575,14 @@ const ToolCallPart = memo(function ToolCallPart({
       toolNameLower === "plan_review" ||
       isFileTool) &&
     !part.errorText
+  const browserToolName = browserToolNameFromCall(
+    part.toolName,
+    part.input,
+    part.output ?? part.errorText
+  )
+  if (browserToolName) {
+    return <BrowserToolCard part={part} />
+  }
   // codex-acp #288: the context-compaction lifecycle is a `tool_call` tagged
   // with `_meta.contextCompaction` (not addressed by tool name) → a subtle
   // status card instead of the generic tool shell.

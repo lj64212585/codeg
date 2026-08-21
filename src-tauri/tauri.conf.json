@@ -28,9 +28,10 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../out": "web/"
+      "../out": "web/",
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
     },
-    "externalBin": ["binaries/codeg-mcp"],
+    "externalBin": ["binaries/codeg-mcp", "binaries/codeg-browser-sidecar"],
     "windows": {
       "nsis": {
         "installerHooks": "./windows/installer-hooks.nsh"

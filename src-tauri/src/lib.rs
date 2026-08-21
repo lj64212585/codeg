@@ -17,6 +17,7 @@ mod app_error;
 pub mod app_state;
 pub mod automation;
 pub mod backgrounds;
+pub mod browser_runtime;
 pub mod chat_channel;
 pub mod commands;
 pub mod db;
@@ -62,23 +63,19 @@ mod tauri_app {
     use crate::acp::manager::ConnectionManager;
     use crate::chat_channel::manager::ChatChannelManager;
     use crate::commands::{
-        acp as acp_commands, app_update as app_update_commands,
-        automation as automation_commands, background as background_commands, backup,
+        acp as acp_commands, app_update as app_update_commands, automation as automation_commands,
+        background as background_commands, backup, browser as browser_commands,
         chat_authoring as chat_authoring_commands, chat_channel as chat_channel_commands,
-        conversations,
-        custom_skills as custom_skills_commands, delegation as delegation_commands,
+        conversations, custom_skills as custom_skills_commands, delegation as delegation_commands,
         experts as experts_commands, feedback as feedback_commands, file_io, folder_commands,
-        folder_links, office_tools as office_tools_commands,
-        folders, logging as logging_commands, mcp as mcp_commands,
-        model_provider as model_provider_commands, notification, pet as pet_commands, project_boot,
+        folder_links, folders, forge as forge_commands, logging as logging_commands,
+        mcp as mcp_commands, model_provider as model_provider_commands, notification,
+        office_tools as office_tools_commands, pet as pet_commands, project_boot,
         question as question_commands, quick_messages as quick_messages_commands,
-        remote_proxy as remote_proxy_commands,
-        remote_workspace as remote_workspace_commands, science as science_commands,
-        session_info as session_info_commands,
-        system_settings, terminal as terminal_commands,
-        token_usage as token_usage_commands,
-        forge as forge_commands, version_control, windows, work_task as work_task_commands,
-        workspace_state as workspace_state_commands,
+        remote_proxy as remote_proxy_commands, remote_workspace as remote_workspace_commands,
+        science as science_commands, session_info as session_info_commands, system_settings,
+        terminal as terminal_commands, token_usage as token_usage_commands, version_control,
+        windows, work_task as work_task_commands, workspace_state as workspace_state_commands,
     };
     use crate::terminal::manager::TerminalManager;
     use crate::{db, git_credential, network, paths, process, web};
@@ -350,6 +347,29 @@ mod tauri_app {
                 ))
                 .map_err(|e| e.to_string())?;
                 app.manage(database);
+
+                // Managed Browser MCP runtime. The public status handle never
+                // contains its loopback endpoint or bearer token; the provider
+                // installed into ConnectionManager is the only path that can
+                // materialize those private headers for a healthy ACP session.
+                let browser_runtime = crate::browser_runtime::BrowserRuntimeManager::new(
+                    effective_data_dir.clone(),
+                    web::event_bridge::EventEmitter::Tauri(app.handle().clone()),
+                );
+                let browser_settings = tauri::async_runtime::block_on(
+                    browser_runtime.load_settings(&app.state::<db::AppDatabase>()),
+                )
+                .unwrap_or_default();
+                app.state::<ConnectionManager>()
+                    .install_browser_mcp_provider(std::sync::Arc::new(browser_runtime.clone()));
+                app.manage(browser_runtime.clone());
+                if browser_settings.enabled {
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = browser_runtime.start().await {
+                            tracing::warn!("[Browser] auto-start failed: {error}");
+                        }
+                    });
+                }
 
                 // Restore and apply saved system proxy settings before any network operation.
                 let db = app.state::<db::AppDatabase>();
@@ -1413,6 +1433,21 @@ mod tauri_app {
                 backup::backup_scan_external_conflicts,
                 backup::backup_restore_stage,
                 backup::backup_cancel,
+                browser_commands::browser_get_status,
+                browser_commands::browser_get_settings,
+                browser_commands::browser_update_settings,
+                browser_commands::browser_start,
+                browser_commands::browser_stop,
+                browser_commands::browser_restart,
+                browser_commands::browser_recover,
+                browser_commands::browser_doctor,
+                browser_commands::browser_get_diagnostics,
+                browser_commands::browser_test_connection,
+                browser_commands::browser_surface_ensure,
+                browser_commands::browser_surface_attach,
+                browser_commands::browser_surface_action,
+                browser_commands::browser_surface_detach,
+                browser_commands::browser_surface_close,
                 chat_channel_commands::list_chat_channels,
                 chat_channel_commands::create_chat_channel,
                 chat_channel_commands::update_chat_channel,
@@ -1461,6 +1496,11 @@ mod tauri_app {
                     }
                     if let Some(ws) = app.try_state::<web::WebServerState>() {
                         tauri::async_runtime::block_on(web::do_stop_web_server(&ws));
+                    }
+                    if let Some(browser) =
+                        app.try_state::<crate::browser_runtime::BrowserRuntimeManager>()
+                    {
+                        let _ = tauri::async_runtime::block_on(browser.stop());
                     }
                     if let Some(tm) = app.try_state::<TerminalManager>() {
                         tm.kill_all();

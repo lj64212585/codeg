@@ -789,9 +789,10 @@ fn agent_debug_callback(
     stdio_debug_enabled: bool,
 ) -> impl Fn(&str, sacp_tokio::LineDirection) + Send + Sync + 'static {
     move |line, dir| {
+        let safe_line = redact_bearer_secrets(line);
         let (tag, enabled) = match dir {
             sacp_tokio::LineDirection::Stderr => {
-                stderr_tail.push(line);
+                stderr_tail.push(&safe_line);
                 ("stderr", true)
             }
             sacp_tokio::LineDirection::Stdout => ("stdout", stdio_debug_enabled),
@@ -801,8 +802,8 @@ fn agent_debug_callback(
             return;
         }
         const MAX: usize = 256;
-        if line.len() > MAX {
-            let head = line
+        if safe_line.len() > MAX {
+            let head = safe_line
                 .char_indices()
                 .take_while(|(i, _)| *i < MAX)
                 .last()
@@ -810,13 +811,41 @@ fn agent_debug_callback(
                 .unwrap_or(MAX);
             tracing::debug!(
                 "[ACP][{agent_name}][{tag}] {}... <truncated {} bytes>",
-                &line[..head],
-                line.len() - head
+                &safe_line[..head],
+                safe_line.len() - head
             );
         } else {
-            tracing::debug!("[ACP][{agent_name}][{tag}] {line}");
+            tracing::debug!("[ACP][{agent_name}][{tag}] {safe_line}");
         }
     }
+}
+
+/// Redact bearer credentials before ACP stdio or agent stderr reaches either
+/// tracing or the in-memory stderr diagnostic tail. The managed Browser MCP
+/// token is necessarily present in `session/*` wire requests, including when
+/// `CODEG_ACP_DEBUG=1`; debug mode must not turn that private loopback secret
+/// into a persisted log entry.
+fn redact_bearer_secrets(line: &str) -> String {
+    const MARKER: &str = "bearer ";
+    let lower = line.to_ascii_lowercase();
+    let mut output = String::with_capacity(line.len());
+    let mut cursor = 0;
+    while let Some(relative) = lower[cursor..].find(MARKER) {
+        let marker_start = cursor + relative;
+        let token_start = marker_start + MARKER.len();
+        output.push_str(&line[cursor..token_start]);
+        output.push_str("[REDACTED]");
+        let token_end = line[token_start..]
+            .char_indices()
+            .find_map(|(offset, ch)| {
+                (ch.is_whitespace() || matches!(ch, '"' | '\'' | '\\' | ',' | '}' | ']'))
+                    .then_some(token_start + offset)
+            })
+            .unwrap_or(line.len());
+        cursor = token_end;
+    }
+    output.push_str(&line[cursor..]);
+    output
 }
 
 async fn build_agent(
@@ -1252,6 +1281,7 @@ pub async fn spawn_agent_connection(
     preferred_mode_id: Option<String>,
     preferred_config_values: BTreeMap<String, String>,
     delegation_injection: Option<DelegationInjection>,
+    browser_mcp_provider: Option<Arc<dyn BrowserMcpProvider>>,
     terminal_shell_config: TerminalShellRuntimeConfig,
 ) -> Result<tokio::sync::oneshot::Receiver<()>, AcpError> {
     // Create the authoritative session state up front. Subsequent emit_with_state
@@ -1412,6 +1442,7 @@ pub async fn spawn_agent_connection(
             let _cleanup = cleanup_guard;
             connection_rt.block_on(async move {
         let delegation_for_cleanup = delegation_injection.clone();
+        let browser_for_cleanup = browser_mcp_provider.clone();
         let result = run_connection(
             agent,
             conn_id.clone(),
@@ -1426,6 +1457,7 @@ pub async fn spawn_agent_connection(
             preferred_mode_id,
             preferred_config_values,
             delegation_injection,
+            browser_mcp_provider,
             fs_policy,
             host_tools,
             stderr_tail,
@@ -1454,6 +1486,9 @@ pub async fn spawn_agent_connection(
             inj.plan_approvals
                 .cancel_plan_approvals_by_parent(&conn_id)
                 .await;
+        }
+        if let Some(browser) = browser_for_cleanup {
+            browser.release_session(&conn_id).await;
         }
 
         if let Err(e) = result {
@@ -3296,6 +3331,41 @@ fn agent_delivers_wire_mcp(agent_type: AgentType) -> bool {
     !matches!(agent_type, AgentType::Pi)
 }
 
+fn browser_mcp_injection_allowed(
+    agent_supports_mcp: bool,
+    agent_delivers_mcp: bool,
+    http_capability: bool,
+) -> bool {
+    agent_supports_mcp && agent_delivers_mcp && http_capability
+}
+
+#[cfg(test)]
+mod browser_mcp_gate_tests {
+    use super::{browser_mcp_injection_allowed, redact_bearer_secrets};
+
+    #[test]
+    fn browser_requires_registry_delivery_and_http_gates() {
+        for supports in [false, true] {
+            for delivers in [false, true] {
+                for http in [false, true] {
+                    assert_eq!(
+                        browser_mcp_injection_allowed(supports, delivers, http),
+                        supports && delivers && http
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn browser_bearer_is_redacted_from_acp_debug_lines() {
+        let line = r#"{"headers":[{"name":"Authorization","value":"Bearer private-token"}]}"#;
+        let redacted = redact_bearer_secrets(line);
+        assert!(!redacted.contains("private-token"));
+        assert!(redacted.contains("Bearer [REDACTED]"));
+    }
+}
+
 /// Load MCP servers configured for `agent_type` and convert them into the
 /// ACP wire format. Errors and unsupported entries are logged and skipped so
 /// a single malformed entry never blocks a session from starting.
@@ -3373,6 +3443,25 @@ fn load_mcp_servers_for_agent(agent_type: AgentType) -> Vec<McpServer> {
 pub trait AgentAvailabilityLookup: Send + Sync {
     /// Wire slugs (`AgentType::as_wire`) of the agents disabled in settings.
     async fn disabled_agent_wire_slugs(&self) -> Vec<String>;
+}
+
+/// Readiness-gated source for the managed Browser MCP entry. Desktop startup
+/// installs one provider; server mode and unsupported platforms leave it unset.
+#[async_trait::async_trait]
+pub trait BrowserMcpProvider: Send + Sync {
+    /// Snapshot the future-session default at Agent connection creation. The
+    /// caller freezes this value for the logical session so later Settings
+    /// changes cannot add or revoke Browser on a running session.
+    async fn enabled_for_new_session(&self) -> bool;
+
+    /// Return the private loopback HTTP MCP server only while the runtime is
+    /// healthy. Enablement was already frozen by the connection manager;
+    /// implementations keep endpoint/token out of public status payloads and
+    /// scope the returned headers to `session_id`.
+    async fn server_for_session(&self, session_id: &str) -> Option<McpServer>;
+
+    /// Release every tab/download owned by this ACP connection.
+    async fn release_session(&self, session_id: &str);
 }
 
 /// [`AgentAvailabilityLookup`] over the live `AppDatabase`: `agent_setting`
@@ -3854,6 +3943,7 @@ async fn run_connection(
     preferred_mode_id: Option<String>,
     preferred_config_values: BTreeMap<String, String>,
     delegation_injection: Option<DelegationInjection>,
+    browser_mcp_provider: Option<Arc<dyn BrowserMcpProvider>>,
     fs_policy: FsAccessPolicy,
     host_tools: HostToolsPolicy,
     // Connection-scoped agent stderr buffer, shared with the `with_debug`
@@ -4352,6 +4442,23 @@ async fn run_connection(
                 );
                 Vec::new()
             };
+
+            // Browser is an HTTP-only built-in MCP. Inject it at this shared
+            // new/load/resume chokepoint only when BOTH the registry and the
+            // live ACP handshake advertise support, and only when the provider
+            // reports a healthy Ready runtime. Any failed gate leaves the
+            // agent session fully usable without a phantom endpoint.
+            if browser_mcp_injection_allowed(
+                agent_supports_mcp,
+                agent_delivers_wire_mcp(agent_type),
+                init_resp.agent_capabilities.mcp_capabilities.http,
+            ) {
+                if let Some(provider) = browser_mcp_provider.as_ref() {
+                    if let Some(server) = provider.server_for_session(&conn_id).await {
+                        mcp_servers.push(server);
+                    }
+                }
+            }
 
             // Inject the built-in `codeg-mcp` MCP server. Stdio is
             // unconditionally supported by the ACP wire — no `mcp_caps`

@@ -18,6 +18,7 @@ import { isBackgroundTaskToolCall } from "@/lib/background-task"
 import { isContextCompactionMeta } from "@/lib/context-compaction"
 import { isUnsettledToolCall } from "@/lib/tool-call-lifecycle"
 import { feedbackCheckHasContent } from "@/lib/feedback-check"
+import { browserToolNameFromCall } from "@/lib/browser-tool"
 import {
   isPlanLikeToolName,
   isPlanModeToolName,
@@ -72,6 +73,8 @@ export type AdaptedToolCallPart = {
    * Agent card during streaming — promotion and history never carry it.
    */
   agentTranscript?: AgentTranscriptEntry[] | null
+  /** Images returned by a non-image-generation tool (for Browser screenshots). */
+  images?: ImageData[] | null
 }
 
 /**
@@ -1105,12 +1108,11 @@ function deriveImageNameFromImageData(img: {
  * image, or a multi-page PDF read returning one image per page) into one
  * `generated-image` part per image.
  *
- * Mirrors the live ACP path: there, an image-bearing ToolCall is detected by
- * `isImageGenerationToolCall` (`images.length > 0`) and rendered as
- * `image_generation` block(s) in place of a generic tool card. Doing the same
- * here means the historical (JSONL replay) view of that Read shows the picture
- * in-position instead of degrading to a bare "Read foo.png" row — closing the
- * live/historical asymmetry.
+ * Live ACP now forwards ordinary tool images on this same `tool_result` shape,
+ * so live and historical Read/PDF results both pass through this adapter. A
+ * Browser tool is deliberately excluded by the caller: its screenshot remains
+ * attached to the dedicated Browser tool card rather than being relabeled as
+ * generated art.
  *
  * Returns `null` when the result carries no usable images, so callers fall
  * through to the normal tool-card path. Images missing `data`/`mime_type` are
@@ -1206,6 +1208,14 @@ export function groupConsecutiveToolCalls(
       // dedicated <BackgroundTaskCard> that merges a task's repeated polls, so
       // they break the run instead of folding into a "执行 N 个任务" tool-group.
       !isBackgroundTaskToolCall(part) &&
+      // Browser calls carry URL/tab/download/screenshot media in a dedicated
+      // card. Keep them standalone so a screenshot is visible immediately
+      // instead of being hidden inside the generic collapsed tool summary.
+      !browserToolNameFromCall(
+        part.toolName,
+        part.input,
+        part.output ?? part.errorText
+      ) &&
       // Context-compaction items (codex `_meta.contextCompaction`, and Grok's
       // synthesized auto_compact card) render through the dedicated subtle
       // <ContextCompactionCard>, so they break the run and render standalone
@@ -1869,9 +1879,15 @@ export function adaptMessageTurn(
         // image card(s) (matching the live ACP path) instead of a generic
         // "Read foo.png" tool card. Only when the tool is no longer running —
         // mid-stream we keep the spinner via the normal tool-call path.
-        const imageParts = isToolStillRunning
-          ? null
-          : adaptImageToolResultParts(matchedResult)
+        const isBrowserTool = browserToolNameFromCall(
+          block.tool_name,
+          block.input_preview,
+          matchedResult.output_preview
+        )
+        const imageParts =
+          isToolStillRunning || isBrowserTool
+            ? null
+            : adaptImageToolResultParts(matchedResult)
         if (imageParts) {
           adaptedContent.push(...imageParts)
           continue
@@ -1893,6 +1909,7 @@ export function adaptMessageTurn(
           agentStats: matchedResult.agent_stats ?? undefined,
           meta: block.meta ?? null,
           agentTranscript: matchedResult.agent_transcript ?? undefined,
+          images: matchedResult.images ?? undefined,
         })
       } else {
         // Position-based matching: if this tool_use has no ID, check next block
@@ -1908,7 +1925,14 @@ export function adaptMessageTurn(
           positionMatchedIndices.add(index + 1)
           // Same image-result handling as the id-matched branch above: a Read
           // returning image bytes renders as image card(s) in-position.
-          const imageParts = adaptImageToolResultParts(positionalResult)
+          const isBrowserTool = browserToolNameFromCall(
+            block.tool_name,
+            block.input_preview,
+            positionalResult.output_preview
+          )
+          const imageParts = isBrowserTool
+            ? null
+            : adaptImageToolResultParts(positionalResult)
           if (imageParts) {
             adaptedContent.push(...imageParts)
             continue
@@ -1928,6 +1952,7 @@ export function adaptMessageTurn(
             agentStats: positionalResult.agent_stats ?? undefined,
             meta: block.meta ?? null,
             agentTranscript: positionalResult.agent_transcript ?? undefined,
+            images: positionalResult.images ?? undefined,
           })
         } else {
           // For live streaming, unmatched tools are still running.

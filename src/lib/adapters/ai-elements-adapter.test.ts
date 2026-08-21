@@ -1386,6 +1386,48 @@ describe("adaptMessageTurn — image tool results", () => {
     if (group?.type !== "tool-group") throw new Error("expected tool-group")
     expect(group.items[0]?.state).toBe("input-available")
   })
+
+  it("keeps a Browser screenshot as a standalone Browser tool card with media", () => {
+    const adapted = adaptMessageTurn(
+      {
+        id: "browser-shot",
+        role: "assistant",
+        timestamp: "2026-08-20T00:00:00.000Z",
+        blocks: [
+          {
+            type: "tool_use",
+            tool_use_id: "browser_1",
+            tool_name: "page.screenshot",
+            input_preview: JSON.stringify({ format: "png" }),
+          },
+          {
+            type: "tool_result",
+            tool_use_id: "browser_1",
+            output_preview: JSON.stringify({
+              ok: true,
+              action: "page.screenshot",
+              tab: {
+                id: "tab-1",
+                url: "https://example.com",
+                title: "Example",
+              },
+            }),
+            is_error: false,
+            images: [{ data: "QUJD", mime_type: "image/png" }],
+          },
+        ],
+      },
+      msgText,
+      false
+    )
+
+    expect(adapted.content).toHaveLength(1)
+    expect(adapted.content[0]?.type).toBe("tool-call")
+    if (adapted.content[0]?.type !== "tool-call") {
+      throw new Error("expected Browser tool-call")
+    }
+    expect(adapted.content[0].images?.[0]?.data).toBe("QUJD")
+  })
 })
 
 describe("extractUserResourcesFromText — codeg references stay inline", () => {

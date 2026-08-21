@@ -1773,6 +1773,45 @@ describe("buildStreamingTurnsFromLiveMessage — orphan status provenance", () =
   })
 })
 
+describe("buildStreamingTurnsFromLiveMessage — Browser screenshot media", () => {
+  it("keeps Browser images on the tool result instead of relabeling them as image generation", () => {
+    const blocks = buildStreamingTurnsFromLiveMessage(1, {
+      id: "lm-browser-shot",
+      role: "assistant",
+      startedAt: 0,
+      content: [
+        {
+          type: "tool_call",
+          info: {
+            tool_call_id: "browser-shot",
+            title: "page.screenshot",
+            kind: "other",
+            status: "completed",
+            content: JSON.stringify({
+              ok: true,
+              action: "page.screenshot",
+            }),
+            raw_input: JSON.stringify({ format: "png" }),
+            raw_output_chunks: [],
+            raw_output_total_bytes: 0,
+            locations: null,
+            meta: null,
+            images: [{ data: "QUJD", mime_type: "image/png" }],
+          },
+        },
+      ],
+    }).turns.flatMap((turn) => turn.blocks)
+
+    expect(blocks.some((block) => block.type === "image_generation")).toBe(
+      false
+    )
+    const result = blocks.find((block) => block.type === "tool_result")
+    expect(
+      result?.type === "tool_result" ? result.images?.[0]?.data : null
+    ).toBe("QUJD")
+  })
+})
+
 describe("buildStreamingTurnsFromLiveMessage — subagent transcript routing (claude-agent-acp ≥0.63)", () => {
   function toolInfo(overrides: Partial<ToolCallInfo> = {}): ToolCallInfo {
     return {
