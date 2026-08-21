@@ -46,6 +46,12 @@ interface AuxPanelBrowserTabProps {
   onSessionAttached?: (connectionId: string) => void
 }
 
+interface QueuedBrowserInput {
+  connectionId: string
+  generation: number
+  input: BrowserSurfaceInput
+}
+
 function normalizeAddress(value: string): string {
   const trimmed = value.trim()
   if (!trimmed || /^[a-z][a-z\d+.-]*:/i.test(trimmed)) return trimmed
@@ -131,6 +137,8 @@ export function AuxPanelBrowserTab({
   const [retryKey, setRetryKey] = useState(0)
   const generation = useRef(0)
   const surfaceRef = useRef<HTMLDivElement | null>(null)
+  const inputQueue = useRef<QueuedBrowserInput[]>([])
+  const inputQueueRunning = useRef(false)
   const lastViewport = useRef<{
     connectionId: string
     width: number
@@ -245,15 +253,53 @@ export function AuxPanelBrowserTab({
     [connectionId]
   )
 
+  const flushInputQueue = useCallback(async () => {
+    if (inputQueueRunning.current) return
+    inputQueueRunning.current = true
+    try {
+      let next: QueuedBrowserInput | undefined
+      while ((next = inputQueue.current.shift())) {
+        if (generation.current !== next.generation) continue
+        try {
+          await runBrowserSurfaceAction(next.connectionId, {
+            action: "input",
+            input: next.input,
+          })
+        } catch (cause) {
+          if (generation.current === next.generation) {
+            setError(toErrorMessage(cause))
+          }
+        }
+      }
+    } finally {
+      inputQueueRunning.current = false
+    }
+  }, [])
+
   const sendInput = useCallback(
     (input: BrowserSurfaceInput) => {
       if (!connectionId) return
-      void runBrowserSurfaceAction(connectionId, {
-        action: "input",
+      const next = {
+        connectionId,
+        generation: generation.current,
         input,
-      }).catch((cause) => setError(toErrorMessage(cause)))
+      }
+      const pending = inputQueue.current
+      const last = pending[pending.length - 1]
+      if (
+        input.kind === "mouse" &&
+        input.event === "moved" &&
+        last?.connectionId === connectionId &&
+        last.input.kind === "mouse" &&
+        last.input.event === "moved"
+      ) {
+        pending[pending.length - 1] = next
+      } else {
+        pending.push(next)
+      }
+      void flushInputQueue()
     },
-    [connectionId]
+    [connectionId, flushInputQueue]
   )
 
   const frameSource = useMemo(() => {
@@ -278,6 +324,14 @@ export function AuxPanelBrowserTab({
         event.button === 1 ? "middle" : event.button === 2 ? "right" : "left"
       sendInput({
         kind: "mouse",
+        event: "moved",
+        x: point.x,
+        y: point.y,
+        button: "none",
+        modifiers: modifiers(event),
+      })
+      sendInput({
+        kind: "mouse",
         event: phase,
         x: point.x,
         y: point.y,
@@ -285,6 +339,32 @@ export function AuxPanelBrowserTab({
         modifiers: modifiers(event),
       })
       event.currentTarget.focus()
+      event.preventDefault()
+    },
+    [frame, sendInput]
+  )
+
+  const pointerMoveInput = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (!frame) return
+      const rect = event.currentTarget.getBoundingClientRect()
+      const point = browserFramePoint(
+        rect.width,
+        rect.height,
+        frame.deviceWidth,
+        frame.deviceHeight,
+        event.clientX - rect.left,
+        event.clientY - rect.top
+      )
+      if (!point) return
+      sendInput({
+        kind: "mouse",
+        event: "moved",
+        x: point.x,
+        y: point.y,
+        button: "none",
+        modifiers: modifiers(event),
+      })
       event.preventDefault()
     },
     [frame, sendInput]
@@ -477,6 +557,7 @@ export function AuxPanelBrowserTab({
         tabIndex={0}
         aria-label={t("page")}
         onPointerDown={(event) => pointerInput(event, "pressed")}
+        onPointerMove={pointerMoveInput}
         onPointerUp={(event) => pointerInput(event, "released")}
         onWheel={wheelInput}
         onKeyDown={keyInput}
