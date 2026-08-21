@@ -1,3 +1,6 @@
+packages:
+  - "packages/*"
+
 overrides:
   mermaid: ">=11.13.0"
 

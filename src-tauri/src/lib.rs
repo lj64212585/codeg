@@ -17,10 +17,12 @@ mod app_error;
 pub mod app_state;
 pub mod automation;
 pub mod backgrounds;
+pub mod browser_runtime;
 pub mod chat_channel;
 pub mod commands;
 pub mod db;
 pub mod folder_links;
+pub mod forge;
 pub mod git_credential;
 pub mod git_repo;
 pub mod intern;
@@ -61,23 +63,19 @@ mod tauri_app {
     use crate::acp::manager::ConnectionManager;
     use crate::chat_channel::manager::ChatChannelManager;
     use crate::commands::{
-        acp as acp_commands, app_update as app_update_commands,
-        automation as automation_commands, background as background_commands, backup,
+        acp as acp_commands, app_update as app_update_commands, automation as automation_commands,
+        background as background_commands, backup, browser as browser_commands,
         chat_authoring as chat_authoring_commands, chat_channel as chat_channel_commands,
-        conversations,
-        custom_skills as custom_skills_commands, delegation as delegation_commands,
+        conversations, custom_skills as custom_skills_commands, delegation as delegation_commands,
         experts as experts_commands, feedback as feedback_commands, file_io, folder_commands,
-        folder_links, office_tools as office_tools_commands,
-        folders, logging as logging_commands, mcp as mcp_commands,
-        model_provider as model_provider_commands, notification, pet as pet_commands, project_boot,
+        folder_links, folders, forge as forge_commands, logging as logging_commands,
+        mcp as mcp_commands, model_provider as model_provider_commands, notification,
+        office_tools as office_tools_commands, pet as pet_commands, project_boot,
         question as question_commands, quick_messages as quick_messages_commands,
-        remote_proxy as remote_proxy_commands,
-        remote_workspace as remote_workspace_commands, science as science_commands,
-        session_info as session_info_commands,
-        system_settings, terminal as terminal_commands,
-        token_usage as token_usage_commands,
-        version_control, windows, work_task as work_task_commands,
-        workspace_state as workspace_state_commands,
+        remote_proxy as remote_proxy_commands, remote_workspace as remote_workspace_commands,
+        science as science_commands, session_info as session_info_commands, system_settings,
+        terminal as terminal_commands, token_usage as token_usage_commands, version_control,
+        windows, work_task as work_task_commands, workspace_state as workspace_state_commands,
     };
     use crate::terminal::manager::TerminalManager;
     use crate::{db, git_credential, network, paths, process, web};
@@ -206,6 +204,40 @@ mod tauri_app {
             .plugin(tauri_plugin_updater::Builder::new().build())
             .plugin(tauri_plugin_process::init())
             .plugin(tauri_plugin_notification::init())
+            // "Launch at login". LaunchAgent rather than AppleScript on macOS:
+            // writing `~/Library/LaunchAgents/codeg.plist` needs no Automation
+            // consent prompt, where scripting System Events does. No extra
+            // startup args — an auto-started codeg is the same app the user
+            // would have launched by hand.
+            //
+            // Nothing rewrites the registration at startup, deliberately. The
+            // entry records an absolute path that no backend re-validates, so a
+            // refresh would repair a moved app — but `is_enabled()` only knows
+            // whether the *file* is there, and the desktop environments disable
+            // an entry in place: GNOME sets `X-GNOME-Autostart-enabled=false`
+            // inside the .desktop file the plugin would overwrite from a fixed
+            // template. Refreshing would therefore silently undo a disable the
+            // user made outside codeg. Re-toggling the setting rewrites the
+            // path, which is the same repair with consent attached.
+            //
+            // Two accepted defects live in `auto-launch`, which this plugin
+            // wraps, and are still unfixed as of its 0.6 line — so there is no
+            // version to upgrade to, and pinning past `auto-launch ^0.5` (what
+            // the plugin requires) would not help:
+            //   * Windows writes the Run value as `{app_path} {args}` with the
+            //     path unquoted. Per-user installs land under
+            //     `C:\Users\<name>\AppData\Local\codeg\`, so a username with a
+            //     space produces the classic unquoted-path value. Windows'
+            //     successive-prefix parsing still resolves it; the residual
+            //     risk is the usual hijack, which already requires the attacker
+            //     to be able to write `C:\Users\<first>.exe`.
+            //   * macOS builds the plist with a bare `<string>{path}</string>`
+            //     and no XML escaping, so an install path containing `&`, `<`
+            //     or `>` yields a malformed plist and autostart silently fails.
+            .plugin(tauri_plugin_autostart::init(
+                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                None,
+            ))
             .manage(ConnectionManager::new())
             .manage(TerminalManager::new())
             .manage(ChatChannelManager::new())
@@ -315,6 +347,29 @@ mod tauri_app {
                 ))
                 .map_err(|e| e.to_string())?;
                 app.manage(database);
+
+                // Managed Browser MCP runtime. The public status handle never
+                // contains its loopback endpoint or bearer token; the provider
+                // installed into ConnectionManager is the only path that can
+                // materialize those private headers for a healthy ACP session.
+                let browser_runtime = crate::browser_runtime::BrowserRuntimeManager::new(
+                    effective_data_dir.clone(),
+                    web::event_bridge::EventEmitter::Tauri(app.handle().clone()),
+                );
+                let browser_settings = tauri::async_runtime::block_on(
+                    browser_runtime.load_settings(&app.state::<db::AppDatabase>()),
+                )
+                .unwrap_or_default();
+                app.state::<ConnectionManager>()
+                    .install_browser_mcp_provider(std::sync::Arc::new(browser_runtime.clone()));
+                app.manage(browser_runtime.clone());
+                if browser_settings.enabled {
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = browser_runtime.start().await {
+                            tracing::warn!("[Browser] auto-start failed: {error}");
+                        }
+                    });
+                }
 
                 // Restore and apply saved system proxy settings before any network operation.
                 let db = app.state::<db::AppDatabase>();
@@ -1160,6 +1215,8 @@ mod tauri_app {
                 system_settings::probe_terminal_shell_path,
                 system_settings::get_system_rendering_settings,
                 system_settings::update_system_rendering_settings,
+                system_settings::get_system_autostart_settings,
+                system_settings::update_system_autostart_settings,
                 logging_commands::get_log_settings,
                 logging_commands::set_log_settings,
                 logging_commands::get_recent_logs,
@@ -1182,6 +1239,7 @@ mod tauri_app {
                 version_control::update_git_settings,
                 version_control::get_github_accounts,
                 version_control::validate_github_token,
+                version_control::validate_gitlab_token,
                 version_control::update_github_accounts,
                 version_control::save_account_token,
                 version_control::get_account_token,
@@ -1189,6 +1247,7 @@ mod tauri_app {
                 acp_commands::acp_preflight,
                 acp_commands::acp_cursor_auth_status,
                 acp_commands::acp_cursor_list_models,
+                acp_commands::acp_qoder_auth_status,
                 acp_commands::acp_connect,
                 acp_commands::acp_prompt,
                 acp_commands::acp_set_mode,
@@ -1333,6 +1392,7 @@ mod tauri_app {
                 work_task_commands::work_task_cancel,
                 work_task_commands::work_task_merge,
                 work_task_commands::work_task_merge_unqueue,
+                work_task_commands::work_task_deliver_pr,
                 work_task_commands::work_task_complete,
                 work_task_commands::work_task_archive,
                 work_task_commands::work_task_cleanup,
@@ -1346,6 +1406,12 @@ mod tauri_app {
                 work_task_commands::work_task_template_list,
                 work_task_commands::work_task_template_save,
                 work_task_commands::work_task_template_delete,
+                forge_commands::folder_forge_remote,
+                forge_commands::forge_list_issues,
+                forge_commands::forge_tab_count,
+                forge_commands::forge_list_labels,
+                forge_commands::work_task_create_from_forge,
+                forge_commands::work_task_lookup_by_source,
                 terminal_commands::terminal_spawn,
                 terminal_commands::terminal_write,
                 terminal_commands::terminal_resize,
@@ -1367,6 +1433,21 @@ mod tauri_app {
                 backup::backup_scan_external_conflicts,
                 backup::backup_restore_stage,
                 backup::backup_cancel,
+                browser_commands::browser_get_status,
+                browser_commands::browser_get_settings,
+                browser_commands::browser_update_settings,
+                browser_commands::browser_start,
+                browser_commands::browser_stop,
+                browser_commands::browser_restart,
+                browser_commands::browser_recover,
+                browser_commands::browser_doctor,
+                browser_commands::browser_get_diagnostics,
+                browser_commands::browser_test_connection,
+                browser_commands::browser_surface_ensure,
+                browser_commands::browser_surface_attach,
+                browser_commands::browser_surface_action,
+                browser_commands::browser_surface_detach,
+                browser_commands::browser_surface_close,
                 chat_channel_commands::list_chat_channels,
                 chat_channel_commands::create_chat_channel,
                 chat_channel_commands::update_chat_channel,
@@ -1415,6 +1496,11 @@ mod tauri_app {
                     }
                     if let Some(ws) = app.try_state::<web::WebServerState>() {
                         tauri::async_runtime::block_on(web::do_stop_web_server(&ws));
+                    }
+                    if let Some(browser) =
+                        app.try_state::<crate::browser_runtime::BrowserRuntimeManager>()
+                    {
+                        let _ = tauri::async_runtime::block_on(browser.stop());
                     }
                     if let Some(tm) = app.try_state::<TerminalManager>() {
                         tm.kill_all();

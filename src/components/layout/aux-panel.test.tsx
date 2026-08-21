@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest"
 
-import { resolveAuxTabView, shouldCollapseAuxTabs } from "./aux-panel"
+import {
+  resolveAvailableAuxTabs,
+  resolveAuxTabView,
+  shouldCollapseAuxTabs,
+} from "./aux-panel"
 
 describe("resolveAuxTabView", () => {
   it("shows all tabs and keeps the selection in a folder workspace", () => {
@@ -22,6 +26,21 @@ describe("resolveAuxTabView", () => {
     })
   })
 
+  it("keeps Browser alongside Session Details in every context", () => {
+    expect(resolveAuxTabView("browser", 1, false)).toEqual({
+      showFolderTabs: true,
+      effectiveTab: "browser",
+    })
+    expect(resolveAuxTabView("browser", 1, true)).toEqual({
+      showFolderTabs: false,
+      effectiveTab: "browser",
+    })
+    expect(resolveAuxTabView("browser", null, false)).toEqual({
+      showFolderTabs: false,
+      effectiveTab: "browser",
+    })
+  })
+
   it("collapses to Session Details when no folder is open", () => {
     expect(resolveAuxTabView("changes", null, false)).toEqual({
       showFolderTabs: false,
@@ -35,6 +54,22 @@ describe("resolveAuxTabView", () => {
     expect(resolveAuxTabView("file_tree", null, false).effectiveTab).toBe(
       "session_details"
     )
+  })
+})
+
+describe("resolveAvailableAuxTabs", () => {
+  it("keeps Browser while filtering only repository tabs", () => {
+    expect(resolveAvailableAuxTabs(true)).toEqual([
+      "session_details",
+      "file_tree",
+      "changes",
+      "git_log",
+      "browser",
+    ])
+    expect(resolveAvailableAuxTabs(false)).toEqual([
+      "session_details",
+      "browser",
+    ])
   })
 })
 

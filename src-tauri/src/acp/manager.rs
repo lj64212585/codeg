@@ -213,6 +213,15 @@ pub struct ConnectionManager {
     /// init. `Arc<OnceLock>` so the inner `Self` cloned from `clone_ref` sees
     /// the install too — the lock is set once at startup and never mutated.
     delegation_injection: Arc<std::sync::OnceLock<crate::acp::connection::DelegationInjection>>,
+    /// Optional managed Browser MCP provider installed by the Windows desktop
+    /// bootstrap. Shared across clones; server mode leaves it unset.
+    browser_mcp_provider: Arc<
+        std::sync::OnceLock<Arc<dyn crate::acp::connection::BrowserMcpProvider>>,
+    >,
+    /// Browser capability frozen per logical Agent session. Entries share the
+    /// same process-lifetime bound as `spawn_locks`: one per distinct resumed
+    /// session. Fresh sessions are added when their external id arrives.
+    browser_capability_snapshots: Arc<Mutex<HashMap<SpawnDedupKey, bool>>>,
     /// Per-agent-type serialization for `probe_agent_options`. Without
     /// this, rapid agent-tab clicks in the settings UI would fan out one
     /// real CLI process per click — each one running up to 60s. The
@@ -269,6 +278,8 @@ impl ConnectionManager {
             spawn_handshake_timeout: spawn_handshake_timeout_from_env(),
             terminal_shell_config: TerminalShellRuntimeConfig::new(),
             delegation_injection: Arc::new(std::sync::OnceLock::new()),
+            browser_mcp_provider: Arc::new(std::sync::OnceLock::new()),
+            browser_capability_snapshots: Arc::new(Mutex::new(HashMap::new())),
             probe_locks: Arc::new(Mutex::new(HashMap::new())),
             pending_questions: Arc::new(Mutex::new(HashMap::new())),
             pending_plan_approvals: Arc::new(Mutex::new(HashMap::new())),
@@ -283,6 +294,8 @@ impl ConnectionManager {
             spawn_handshake_timeout: self.spawn_handshake_timeout,
             terminal_shell_config: self.terminal_shell_config.clone(),
             delegation_injection: self.delegation_injection.clone(),
+            browser_mcp_provider: self.browser_mcp_provider.clone(),
+            browser_capability_snapshots: self.browser_capability_snapshots.clone(),
             probe_locks: self.probe_locks.clone(),
             pending_questions: self.pending_questions.clone(),
             pending_plan_approvals: self.pending_plan_approvals.clone(),
@@ -298,6 +311,54 @@ impl ConnectionManager {
 
     fn delegation_snapshot(&self) -> Option<crate::acp::connection::DelegationInjection> {
         self.delegation_injection.get().cloned()
+    }
+
+    /// Install the desktop Browser MCP provider exactly once during bootstrap.
+    pub fn install_browser_mcp_provider(
+        &self,
+        provider: Arc<dyn crate::acp::connection::BrowserMcpProvider>,
+    ) {
+        let _ = self.browser_mcp_provider.set(provider);
+    }
+
+    fn browser_mcp_snapshot(
+        &self,
+    ) -> Option<Arc<dyn crate::acp::connection::BrowserMcpProvider>> {
+        self.browser_mcp_provider.get().cloned()
+    }
+
+    async fn browser_mcp_snapshot_for_spawn(
+        &self,
+        key: Option<&SpawnDedupKey>,
+    ) -> (
+        Option<Arc<dyn crate::acp::connection::BrowserMcpProvider>>,
+        bool,
+    ) {
+        let provider = self.browser_mcp_snapshot();
+        if let Some(key) = key {
+            if let Some(enabled) = self
+                .browser_capability_snapshots
+                .lock()
+                .await
+                .get(key)
+                .copied()
+            {
+                return (enabled.then_some(provider).flatten(), enabled);
+            }
+        }
+
+        let enabled = match provider.as_ref() {
+            Some(provider) => provider.enabled_for_new_session().await,
+            None => false,
+        };
+        if let Some(key) = key {
+            self.browser_capability_snapshots
+                .lock()
+                .await
+                .entry(key.clone())
+                .or_insert(enabled);
+        }
+        (enabled.then_some(provider).flatten(), enabled)
     }
 
     /// Returns the shared terminal-shell setting consumed by ACP terminal
@@ -317,6 +378,8 @@ impl ConnectionManager {
             spawn_handshake_timeout: timeout,
             terminal_shell_config: TerminalShellRuntimeConfig::new(),
             delegation_injection: Arc::new(std::sync::OnceLock::new()),
+            browser_mcp_provider: Arc::new(std::sync::OnceLock::new()),
+            browser_capability_snapshots: Arc::new(Mutex::new(HashMap::new())),
             probe_locks: Arc::new(Mutex::new(HashMap::new())),
             pending_questions: Arc::new(Mutex::new(HashMap::new())),
             pending_plan_approvals: Arc::new(Mutex::new(HashMap::new())),
@@ -430,6 +493,11 @@ impl ConnectionManager {
         // spawning a fresh process — this is what makes a browser refresh
         // mid-turn re-attach to the existing live state rather than orphan it.
         let working_dir_path = working_dir.as_ref().map(PathBuf::from);
+        let session_key = session_id.as_ref().map(|session_id| SpawnDedupKey {
+            agent_type,
+            working_dir: working_dir_path.clone(),
+            session_id: session_id.clone(),
+        });
 
         // Acquire a per-(agent, working_dir, session_id) async mutex so two
         // concurrent connects for the same logical session can't both miss
@@ -441,16 +509,11 @@ impl ConnectionManager {
         // is None (fresh sessions can't dedup — by design — since the
         // agent assigns the id).
         let session_id_for_log = session_id.clone();
-        let dedup_lock = if let Some(sid) = session_id.as_deref() {
-            let key = SpawnDedupKey {
-                agent_type,
-                working_dir: working_dir_path.clone(),
-                session_id: sid.to_string(),
-            };
+        let dedup_lock = if let Some(key) = session_key.as_ref() {
             let mu = {
                 let mut locks = self.spawn_locks.lock().await;
                 locks
-                    .entry(key)
+                    .entry(key.clone())
                     .or_insert_with(|| Arc::new(Mutex::new(())))
                     .clone()
             };
@@ -472,6 +535,9 @@ impl ConnectionManager {
         }
 
         let connection_id = uuid::Uuid::new_v4().to_string();
+        let (browser_mcp_provider, browser_capability_enabled) = self
+            .browser_mcp_snapshot_for_spawn(session_key.as_ref())
+            .await;
         tracing::info!(
             "[ACP] spawning connection id={} owner_window={} agent={:?}",
             connection_id, owner_window_label, agent_type
@@ -493,6 +559,7 @@ impl ConnectionManager {
             preferred_mode_id,
             preferred_config_values,
             self.delegation_snapshot(),
+            browser_mcp_provider,
             self.terminal_shell_config.clone(),
         )
         .await?;
@@ -502,7 +569,7 @@ impl ConnectionManager {
         // next waiter), aborted (connection died), or the timeout fires.
         // Logged on every wait so production can audit real-world handshake
         // latencies and tune `CODEG_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS`.
-        if dedup_lock.is_some() {
+        if session_key.is_some() {
             let timeout = self.spawn_handshake_timeout;
             let (outcome, elapsed) = wait_for_session_started(session_started_rx, timeout).await;
             tracing::info!(
@@ -514,10 +581,34 @@ impl ConnectionManager {
                 elapsed.as_millis(),
                 timeout.as_millis(),
             );
+        } else {
+            let connections = self.connections.clone();
+            let snapshots = self.browser_capability_snapshots.clone();
+            let connection_id_for_snapshot = connection_id.clone();
+            tokio::spawn(async move {
+                if session_started_rx.await.is_err() {
+                    return;
+                }
+                let state = {
+                    let connections = connections.lock().await;
+                    connections
+                        .get(&connection_id_for_snapshot)
+                        .map(|connection| connection.state.clone())
+                };
+                let Some(state) = state else {
+                    return;
+                };
+                let external_id = state.read().await.external_id.clone();
+                let Some(session_id) = external_id else {
+                    return;
+                };
+                snapshots.lock().await.entry(SpawnDedupKey {
+                    agent_type,
+                    working_dir: working_dir_path,
+                    session_id,
+                }).or_insert(browser_capability_enabled);
+            });
         }
-        // session_started_rx (in the no-dedup branch) is dropped here. tx
-        // staying inside SessionState gets dropped naturally when the
-        // connection terminates, no leak.
 
         drop(dedup_lock);
 
@@ -5807,6 +5898,63 @@ mod tests {
             cloned_locks.contains_key(&key),
             "spawn_locks must be shared between original and clone_ref"
         );
+    }
+
+    struct ToggleBrowserProvider {
+        enabled: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::acp::connection::BrowserMcpProvider for ToggleBrowserProvider {
+        async fn enabled_for_new_session(&self) -> bool {
+            self.enabled.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        async fn server_for_session(&self, _session_id: &str) -> Option<sacp::schema::McpServer> {
+            None
+        }
+
+        async fn release_session(&self, _session_id: &str) {}
+    }
+
+    #[tokio::test]
+    async fn browser_capability_is_frozen_per_logical_session() {
+        let mgr = ConnectionManager::new();
+        let provider = Arc::new(ToggleBrowserProvider {
+            enabled: std::sync::atomic::AtomicBool::new(true),
+        });
+        mgr.install_browser_mcp_provider(provider.clone());
+        let existing_session = SpawnDedupKey {
+            agent_type: AgentType::ClaudeCode,
+            working_dir: Some(PathBuf::from("/tmp/browser-snapshot")),
+            session_id: "existing-session".into(),
+        };
+
+        let (first_provider, first_enabled) = mgr
+            .browser_mcp_snapshot_for_spawn(Some(&existing_session))
+            .await;
+        assert!(first_enabled);
+        assert!(first_provider.is_some());
+
+        provider
+            .enabled
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let (resumed_provider, resumed_enabled) = mgr
+            .clone_ref()
+            .browser_mcp_snapshot_for_spawn(Some(&existing_session))
+            .await;
+        assert!(resumed_enabled, "reconnect must keep the creation snapshot");
+        assert!(resumed_provider.is_some());
+
+        let new_session = SpawnDedupKey {
+            session_id: "new-session".into(),
+            ..existing_session
+        };
+        let (new_provider, new_enabled) = mgr
+            .browser_mcp_snapshot_for_spawn(Some(&new_session))
+            .await;
+        assert!(!new_enabled, "a new session must read the latest default");
+        assert!(new_provider.is_none());
     }
 
     /// Two concurrent `send_prompt_linked` calls on the SAME connection

@@ -1,0 +1,31 @@
+{
+  "name": "@codeg/browser-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Codeg managed Browser MCP sidecar",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "codeg-browser-sidecar": "dist/cli.cjs"
+  },
+  "scripts": {
+    "build": "tsc --noEmit && node scripts/build.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "ipaddr.js": "2.5.0",
+    "ws": "8.21.3",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "@types/ws": "8.18.1",
+    "@yao-pkg/pkg": "6.22.0",
+    "esbuild": "0.28.2",
+    "typescript": "~5.8.3",
+    "vitest": "2.1.8"
+  }
+}

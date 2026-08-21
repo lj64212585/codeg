@@ -665,7 +665,8 @@ function cleanAgentOutput(output: string | null): string | null {
  * Decide whether a live `ToolCallInfo` is codex-acp's image-generation
  * tool call. Detection has to fire during the in-flight window
  * (ImageGenerationBegin, no images yet) so we can't rely on `images.length`
- * alone — the load-bearing signal during that window is the title.
+ * at all — the load-bearing signal during that window is the title, and
+ * ordinary tools such as Browser screenshots also carry images.
  *
  * Layered detection:
  *   1. `title === "Image generation"` — codex-acp PR #271 hardcodes this
@@ -673,20 +674,15 @@ function cleanAgentOutput(output: string | null): string | null {
  *      `end_image_generation`. Primary path.
  *   2. Case-insensitive title match — defensive for any future codex-acp
  *      casing/whitespace drift.
- *   3. `images.length > 0` — defensive when title is somehow lost but
- *      images are present (e.g. a snapshot replay that drops the title).
- *
  * The function is intentionally NOT a generic `kind === "other"` matcher
- * because many tools surface as ToolKind::Other.
+ * because many tools surface as ToolKind::Other, and ordinary tools such as
+ * Browser `page.screenshot` also return images.
  */
-function isImageGenerationToolCall(info: {
-  title?: string | null
-  images?: { length: number } | null
-}): boolean {
+function isImageGenerationToolCall(info: { title?: string | null }): boolean {
   const title = (info.title ?? "").trim()
   if (title === "Image generation") return true
   if (title.toLowerCase() === "image generation") return true
-  return (info.images?.length ?? 0) > 0
+  return false
 }
 
 /**
@@ -1223,6 +1219,7 @@ export function buildStreamingTurnsFromLiveMessage(
               : resolvedOutput,
             is_error: block.info.status === "failed",
             ...(agentStats ? { agent_stats: agentStats } : {}),
+            ...(block.info.images?.length ? { images: block.info.images } : {}),
           })
           currentGroupHasCompletedTool = true
         } else if (
@@ -1247,6 +1244,7 @@ export function buildStreamingTurnsFromLiveMessage(
             is_error: false,
             ...(agentStats ? { agent_stats: agentStats } : {}),
             ...(transcript?.length ? { agent_transcript: transcript } : {}),
+            ...(block.info.images?.length ? { images: block.info.images } : {}),
           })
           inProgressToolCallIds.add(block.info.tool_call_id)
         }

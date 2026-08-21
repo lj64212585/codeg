@@ -17,6 +17,7 @@ import {
   Keyboard,
   Menu,
   MessageSquareText,
+  MonitorCog,
   SendHorizontal,
   Palette,
   PlugZap,
@@ -32,8 +33,10 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { AppToaster } from "@/components/ui/app-toaster"
 import { cn } from "@/lib/utils"
 import { detectEnvironment } from "@/lib/transport/detect"
+import { getActiveRemoteConnectionId } from "@/lib/transport"
 import { AppTitleBar } from "@/components/layout/app-title-bar"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { usePlatform } from "@/hooks/use-platform"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 
 interface SettingsNavItem {
@@ -52,6 +55,7 @@ interface SettingsNavItem {
     | "chat_channels"
     | "system"
     | "web_service"
+    | "browser"
     | "logs"
   icon: ComponentType<{ className?: string }>
 }
@@ -118,6 +122,11 @@ const SETTINGS_NAV_ITEMS: SettingsNavItem[] = [
     icon: Globe,
   },
   {
+    href: "/settings/browser",
+    labelKey: "browser",
+    icon: MonitorCog,
+  },
+  {
     href: "/settings/logs",
     labelKey: "logs",
     icon: FileSpreadsheet,
@@ -152,6 +161,7 @@ export function SettingsShell({ children }: SettingsShellProps) {
   const router = useRouter()
   const normalizedPathname = normalizePath(pathname)
   const isMobile = useIsMobile()
+  const { isWindows } = usePlatform()
   const [navOpen, setNavOpen] = useState(false)
 
   useEffect(() => {
@@ -189,7 +199,13 @@ export function SettingsShell({ children }: SettingsShellProps) {
 
   const filteredNavItems = SETTINGS_NAV_ITEMS.filter(
     (item) =>
-      !(item.labelKey === "web_service" && detectEnvironment() === "web")
+      !(item.labelKey === "web_service" && detectEnvironment() === "web") &&
+      !(
+        item.labelKey === "browser" &&
+        (detectEnvironment() !== "tauri" ||
+          !isWindows ||
+          getActiveRemoteConnectionId() !== null)
+      )
   )
 
   const navContent = (

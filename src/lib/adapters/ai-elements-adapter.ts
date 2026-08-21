@@ -18,6 +18,7 @@ import { isBackgroundTaskToolCall } from "@/lib/background-task"
 import { isContextCompactionMeta } from "@/lib/context-compaction"
 import { isUnsettledToolCall } from "@/lib/tool-call-lifecycle"
 import { feedbackCheckHasContent } from "@/lib/feedback-check"
+import { browserToolNameFromCall } from "@/lib/browser-tool"
 import {
   isPlanLikeToolName,
   isPlanModeToolName,
@@ -72,6 +73,8 @@ export type AdaptedToolCallPart = {
    * Agent card during streaming — promotion and history never carry it.
    */
   agentTranscript?: AgentTranscriptEntry[] | null
+  /** Images returned by a non-image-generation tool (for Browser screenshots). */
+  images?: ImageData[] | null
 }
 
 /**
@@ -1105,12 +1108,11 @@ function deriveImageNameFromImageData(img: {
  * image, or a multi-page PDF read returning one image per page) into one
  * `generated-image` part per image.
  *
- * Mirrors the live ACP path: there, an image-bearing ToolCall is detected by
- * `isImageGenerationToolCall` (`images.length > 0`) and rendered as
- * `image_generation` block(s) in place of a generic tool card. Doing the same
- * here means the historical (JSONL replay) view of that Read shows the picture
- * in-position instead of degrading to a bare "Read foo.png" row — closing the
- * live/historical asymmetry.
+ * Live ACP now forwards ordinary tool images on this same `tool_result` shape,
+ * so live and historical Read/PDF results both pass through this adapter. A
+ * Browser tool is deliberately excluded by the caller: its screenshot remains
+ * attached to the dedicated Browser tool card rather than being relabeled as
+ * generated art.
  *
  * Returns `null` when the result carries no usable images, so callers fall
  * through to the normal tool-card path. Images missing `data`/`mime_type` are
@@ -1206,6 +1208,14 @@ export function groupConsecutiveToolCalls(
       // dedicated <BackgroundTaskCard> that merges a task's repeated polls, so
       // they break the run instead of folding into a "执行 N 个任务" tool-group.
       !isBackgroundTaskToolCall(part) &&
+      // Browser calls carry URL/tab/download/screenshot media in a dedicated
+      // card. Keep them standalone so a screenshot is visible immediately
+      // instead of being hidden inside the generic collapsed tool summary.
+      !browserToolNameFromCall(
+        part.toolName,
+        part.input,
+        part.output ?? part.errorText
+      ) &&
       // Context-compaction items (codex `_meta.contextCompaction`, and Grok's
       // synthesized auto_compact card) render through the dedicated subtle
       // <ContextCompactionCard>, so they break the run and render standalone
@@ -1565,7 +1575,44 @@ function mergeGoalObjectiveHints(
  * reloaded goal capsule spins forever. `isStreaming` gates that: an unfinished
  * run flushes with `isRunning: isStreaming`, so it settles (static) once the
  * turn stops or on history reload, and shimmers only while live.
+ *
+ * The Goal card starts collapsed once the run settles, so a settled run must
+ * not keep the turn's answer inside the chip. After the last process item (or
+ * when the body is only answer parts), lift those parts out so a reload still
+ * shows the final answer under the chip. While the turn is live the answer
+ * stays in the card, which opens itself as soon as it holds anything.
  */
+
+/**
+ * Parts that ARE the turn's answer rather than the process that produced it:
+ * prose, the codex Plan-mode document the user has to read, and a generated
+ * image. Everything else (tool calls/results/groups, reasoning, todo plans,
+ * delegation and background-task polls) is process and belongs in the capsule.
+ */
+const GOAL_ANSWER_PART_TYPES: ReadonlySet<AdaptedContentPart["type"]> = new Set(
+  ["text", "proposed-plan", "generated-image"]
+)
+
+/**
+ * Split a settled unfinished run's body at the last process part: everything
+ * after it is the answer and gets lifted out, in order. Answer parts BEFORE a
+ * process part stay inside — prose followed by more work is a mid-run note,
+ * not a wrap-up, and lifting it would reorder the reply.
+ */
+function splitTrailingAnswerParts(items: AdaptedContentPart[]): {
+  body: AdaptedContentPart[]
+  trailing: AdaptedContentPart[]
+} {
+  let end = items.length
+  while (end > 0 && GOAL_ANSWER_PART_TYPES.has(items[end - 1]!.type)) {
+    end -= 1
+  }
+  if (end === items.length) {
+    return { body: items, trailing: [] }
+  }
+  return { body: items.slice(0, end), trailing: items.slice(end) }
+}
+
 export function groupGoalRuns(
   parts: AdaptedContentPart[],
   isStreaming: boolean = false
@@ -1592,17 +1639,44 @@ export function groupGoalRuns(
     return Boolean(objective && completedGoalObjectives.has(objective))
   }
 
-  const flushActive = () => {
-    if (!active) return
+  const pushGoalRun = (
+    start: AdaptedToolCallPart,
+    end: AdaptedToolCallPart | null,
+    items: AdaptedContentPart[],
+    isRunning: boolean
+  ) => {
+    // Keep the live answer inside the running card (it opens while in flight).
+    // Once the turn settles, lift the trailing answer so a collapsed chip on
+    // reload does not hide it.
+    // Only lift when the run never closed. A completed update_goal already
+    // leaves later prose as siblings; mid-run notes stay in that card.
+    const shouldLiftTrailing = !isRunning && end === null
+    if (!shouldLiftTrailing) {
+      result.push({
+        type: "goal-run",
+        start,
+        end,
+        items: [...items],
+        isRunning,
+      })
+      return
+    }
+    const { body, trailing } = splitTrailingAnswerParts(items)
     result.push({
       type: "goal-run",
-      start: active.start,
+      start,
       end: null,
-      items: [...active.items],
-      // Unfinished run: shimmer only while the turn is live. A stopped or
-      // reloaded goal (codex never emits a closing update_goal) settles static.
-      isRunning: isStreaming,
+      items: body,
+      isRunning: false,
     })
+    result.push(...trailing)
+  }
+
+  const flushActive = () => {
+    if (!active) return
+    // Unfinished run: shimmer only while the turn is live. A stopped or
+    // reloaded goal (codex never emits a closing update_goal) settles static.
+    pushGoalRun(active.start, null, active.items, isStreaming)
     active = null
   }
 
@@ -1619,10 +1693,7 @@ export function groupGoalRuns(
         } else if (part.end === null) {
           active = { start: part.start, items: [...part.items] }
         } else {
-          result.push({
-            ...part,
-            items: [...part.items],
-          })
+          pushGoalRun(part.start, part.end, part.items, part.isRunning)
           rememberCompletedGoal(part.start, part.end)
         }
         continue
@@ -1637,13 +1708,12 @@ export function groupGoalRuns(
       if (part.end === null) {
         active.items.push(...part.items)
       } else {
-        result.push({
-          type: "goal-run",
-          start: active.start,
-          end: part.end,
-          items: [...active.items, ...part.items],
-          isRunning: part.isRunning,
-        })
+        pushGoalRun(
+          active.start,
+          part.end,
+          [...active.items, ...part.items],
+          part.isRunning
+        )
         rememberCompletedGoal(active.start, part.end)
         active = null
       }
@@ -1664,13 +1734,7 @@ export function groupGoalRuns(
     }
 
     if (active && isGoalEndPart(part)) {
-      result.push({
-        type: "goal-run",
-        start: active.start,
-        end: part,
-        items: [...active.items],
-        isRunning: isRunningToolCall(part),
-      })
+      pushGoalRun(active.start, part, active.items, isRunningToolCall(part))
       rememberCompletedGoal(active.start, part)
       active = null
       continue
@@ -1815,9 +1879,15 @@ export function adaptMessageTurn(
         // image card(s) (matching the live ACP path) instead of a generic
         // "Read foo.png" tool card. Only when the tool is no longer running —
         // mid-stream we keep the spinner via the normal tool-call path.
-        const imageParts = isToolStillRunning
-          ? null
-          : adaptImageToolResultParts(matchedResult)
+        const isBrowserTool = browserToolNameFromCall(
+          block.tool_name,
+          block.input_preview,
+          matchedResult.output_preview
+        )
+        const imageParts =
+          isToolStillRunning || isBrowserTool
+            ? null
+            : adaptImageToolResultParts(matchedResult)
         if (imageParts) {
           adaptedContent.push(...imageParts)
           continue
@@ -1839,6 +1909,7 @@ export function adaptMessageTurn(
           agentStats: matchedResult.agent_stats ?? undefined,
           meta: block.meta ?? null,
           agentTranscript: matchedResult.agent_transcript ?? undefined,
+          images: matchedResult.images ?? undefined,
         })
       } else {
         // Position-based matching: if this tool_use has no ID, check next block
@@ -1854,7 +1925,14 @@ export function adaptMessageTurn(
           positionMatchedIndices.add(index + 1)
           // Same image-result handling as the id-matched branch above: a Read
           // returning image bytes renders as image card(s) in-position.
-          const imageParts = adaptImageToolResultParts(positionalResult)
+          const isBrowserTool = browserToolNameFromCall(
+            block.tool_name,
+            block.input_preview,
+            positionalResult.output_preview
+          )
+          const imageParts = isBrowserTool
+            ? null
+            : adaptImageToolResultParts(positionalResult)
           if (imageParts) {
             adaptedContent.push(...imageParts)
             continue
@@ -1874,6 +1952,7 @@ export function adaptMessageTurn(
             agentStats: positionalResult.agent_stats ?? undefined,
             meta: block.meta ?? null,
             agentTranscript: positionalResult.agent_transcript ?? undefined,
+            images: positionalResult.images ?? undefined,
           })
         } else {
           // For live streaming, unmatched tools are still running.

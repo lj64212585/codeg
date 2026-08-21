@@ -23,15 +23,24 @@
 // Windows GitHub runners.
 
 import { execFileSync } from "node:child_process"
-import { existsSync, copyFileSync, mkdirSync, chmodSync } from "node:fs"
+import {
+  existsSync,
+  copyFileSync,
+  mkdirSync,
+  chmodSync,
+  writeFileSync,
+  statSync,
+} from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import process from "node:process"
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const SRC_TAURI = resolve(SCRIPT_DIR, "..")
+const APP_ROOT = resolve(SRC_TAURI, "..")
 const BINARIES_DIR = join(SRC_TAURI, "binaries")
 const BIN_NAME = "codeg-mcp"
+const BROWSER_BIN_NAME = "codeg-browser-sidecar"
 
 function log(msg) {
   console.log(`[prepare-sidecars] ${msg}`)
@@ -40,6 +49,32 @@ function log(msg) {
 function die(msg) {
   console.error(`[prepare-sidecars][ERROR] ${msg}`)
   process.exit(1)
+}
+
+function assertNonEmpty(path) {
+  if (!existsSync(path) || statSync(path).size <= 0) {
+    die(`expected non-empty sidecar at ${path}`)
+  }
+}
+
+function runPnpm(args, cwd) {
+  // Windows cannot exec a .cmd shim directly through spawnSync on every Node
+  // release. A pnpm-launched lifecycle exposes the real JS entrypoint, which
+  // we can execute without a shell (and without quoting ambiguity).
+  const entrypoint = process.env.npm_execpath
+  if (entrypoint) {
+    execFileSync(process.execPath, [entrypoint, ...args], {
+      stdio: "inherit",
+      cwd,
+    })
+    return
+  }
+  if (process.platform === "win32") {
+    die(
+      "npm_execpath is unavailable; run this script through `pnpm tauri:prepare-sidecars`"
+    )
+  }
+  execFileSync("pnpm", args, { stdio: "inherit", cwd })
 }
 
 function parseArgs(argv) {
@@ -114,12 +149,65 @@ function main() {
   mkdirSync(BINARIES_DIR, { recursive: true })
   const dest = join(BINARIES_DIR, `${BIN_NAME}-${target}${ext}`)
   copyFileSync(built, dest)
+  assertNonEmpty(dest)
   if (!isWindows) {
     // copyFileSync preserves modes on POSIX, but be explicit for tarball
     // sources that may strip the +x bit.
     chmodSync(dest, 0o755)
+    assertNonEmpty(dest)
   }
   log(`sidecar staged at ${dest}`)
+
+  stageBrowserSidecar(target, isWindows, ext)
+}
+
+function stageBrowserSidecar(target, isWindows, ext) {
+  log(`building ${BROWSER_BIN_NAME} from fixed workspace dependencies`)
+  runPnpm(["--filter", "@codeg/browser-mcp", "build"], APP_ROOT)
+
+  mkdirSync(BINARIES_DIR, { recursive: true })
+  const dest = join(BINARIES_DIR, `${BROWSER_BIN_NAME}-${target}${ext}`)
+  if (!isWindows) {
+    // Stage 2 is intentionally Windows-only. Tauri still validates every
+    // externalBin on macOS/Linux release jobs, so ship an explicit fail-closed
+    // stub instead of a zero-byte placeholder or a misleading working runtime.
+    writeFileSync(
+      dest,
+      '#!/bin/sh\necho \'{"event":"fatal","code":"unsupported_platform"}\' >&2\nexit 1\n',
+      "utf8"
+    )
+    chmodSync(dest, 0o755)
+    log(`unsupported-platform stub staged at ${dest}`)
+    return
+  }
+
+  const pkgTarget = target.startsWith("aarch64-")
+    ? "node22-win-arm64"
+    : target.startsWith("i686-")
+      ? "node22-win-x86"
+      : "node22-win-x64"
+  runPnpm(
+    [
+      "--filter",
+      "@codeg/browser-mcp",
+      "exec",
+      "pkg",
+      "--targets",
+      pkgTarget,
+      "--output",
+      dest,
+      "--compress",
+      "Brotli",
+      "--no-bytecode",
+      "--public",
+      "--public-packages",
+      "*",
+      "dist/cli.cjs",
+    ],
+    APP_ROOT
+  )
+  assertNonEmpty(dest)
+  log(`Browser sidecar staged at ${dest}`)
 }
 
 main()

@@ -4,6 +4,8 @@ pub mod app_update;
 pub mod automation;
 pub mod background;
 pub mod backup;
+#[cfg(feature = "tauri-runtime")]
+pub mod browser;
 pub mod chat_authoring;
 pub mod chat_channel;
 pub mod conversations;
@@ -17,6 +19,7 @@ pub mod file_io;
 pub mod folder_commands;
 pub mod folder_links;
 pub mod folders;
+pub mod forge;
 pub mod logging;
 pub mod mcp;
 pub mod model_provider;

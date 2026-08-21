@@ -300,32 +300,35 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      # Build the `codeg-mcp` companion binary for the matrix target and
-      # stage it as a Tauri sidecar at
-      # `src-tauri/binaries/codeg-mcp-<triple>{.exe}`. `tauri-action` (below)
-      # then bundles it via the `bundle.externalBin` entry in
+      # Build the `codeg-mcp` companion and the fixed, offline Browser runtime
+      # package for the matrix target. Stage 2 Browser support is Windows-only;
+      # non-Windows targets receive an explicit fail-closed stub so Tauri's
+      # externalBin validation remains honest. `tauri-action` then bundles both
+      # files via the `bundle.externalBin` entry in
       # `tauri.conf.json` — Tauri installs it next to the main executable
       # (Contents/MacOS on macOS, install root on Linux/Windows) where the
-      # runtime `locate_codeg_mcp_binary()` finds it via `current_exe`
-      # sibling lookup. The Linux arm64 cross env vars set above also
+      # runtime locators find them via `current_exe` sibling lookup. The Linux
+      # arm64 cross env vars set above also
       # apply to this cargo invocation.
-      - name: Stage codeg-mcp sidecar for Tauri bundle
+      - name: Stage Tauri sidecars
         shell: bash
         run: pnpm tauri:prepare-sidecars --target ${{ matrix.target }}
 
-      - name: Verify codeg-mcp sidecar landed
+      - name: Verify Tauri sidecars landed
         shell: bash
         run: |
           ext=""
           case "${{ matrix.target }}" in
             *windows*) ext=".exe" ;;
           esac
-          file="src-tauri/binaries/codeg-mcp-${{ matrix.target }}${ext}"
-          if [ ! -f "$file" ]; then
-            echo "FATAL: sidecar $file missing after prepare-sidecars"
-            exit 1
-          fi
-          ls -la "$file"
+          for name in codeg-mcp codeg-browser-sidecar; do
+            file="src-tauri/binaries/${name}-${{ matrix.target }}${ext}"
+            if [ ! -s "$file" ]; then
+              echo "FATAL: non-empty sidecar $file missing after prepare-sidecars"
+              exit 1
+            fi
+            ls -la "$file"
+          done
 
       - name: Import Apple Developer ID certificate
         if: contains(matrix.target, 'apple-darwin')

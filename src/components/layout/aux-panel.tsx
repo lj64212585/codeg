@@ -5,6 +5,7 @@ import {
   Folder,
   FolderPen,
   GitCommit,
+  Globe2,
   ReceiptText,
   type LucideIcon,
 } from "lucide-react"
@@ -34,8 +35,14 @@ import { SessionDetailsTab } from "./aux-panel-session-details-tab"
 import { FileTreeTab } from "./aux-panel-file-tree-tab"
 import { GitChangesTab } from "./aux-panel-git-changes-tab"
 import { GitLogTab } from "./aux-panel-git-log-tab"
+import { AuxPanelBrowserTab } from "./aux-panel-browser-tab"
 
-const LAZY_TABS: AuxPanelTab[] = ["file_tree", "changes", "git_log"]
+const LAZY_TABS: AuxPanelTab[] = ["file_tree", "changes", "git_log", "browser"]
+const FOLDER_SCOPED_TABS = new Set<AuxPanelTab>([
+  "file_tree",
+  "changes",
+  "git_log",
+])
 
 // Visible order + icon for every aux tab. Both the desktop segmented control
 // and the collapsed picker map over this, so the two surfaces can never drift.
@@ -44,18 +51,20 @@ const TAB_ORDER: AuxPanelTab[] = [
   "file_tree",
   "changes",
   "git_log",
+  "browser",
 ]
 const TAB_ICONS: Record<AuxPanelTab, LucideIcon> = {
   session_details: ReceiptText,
   file_tree: Folder,
   changes: FolderPen,
   git_log: GitCommit,
+  browser: Globe2,
 }
-// The three folder-scoped tabs share one label namespace (Folder.auxPanel.tabs);
-// session details resolves from its own (Folder.sessionDetails.menuLabel). The
-// value type is the literal key union so next-intl's typed `t()` accepts it.
+// The three repository tabs share one label namespace (Folder.auxPanel.tabs);
+// session details and Browser resolve from their own namespaces. The value type
+// is the literal key union so next-intl's typed `t()` accepts it.
 const FOLDER_TAB_LABEL_KEY: Record<
-  Exclude<AuxPanelTab, "session_details">,
+  "file_tree" | "changes" | "git_log",
   "files" | "changes" | "commits"
 > = {
   file_tree: "files",
@@ -68,7 +77,7 @@ const FOLDER_TAB_LABEL_KEY: Record<
 // overlay (terminal/aux/settings, plus the native caption on Windows/Linux)
 // floats over the RIGHT edge. Once the panel is too narrow to seat the control
 // left of that reserved region, we swap it for a single icon-button + dropdown.
-const SEGMENTED_TABS_WIDTH = 130
+const SEGMENTED_TABS_WIDTH = 162
 const TAB_STRIP_GUTTER = 12 // pl-3
 const TAB_STRIP_GAP = 12 // breathing room before the chrome overlay
 
@@ -93,10 +102,10 @@ export function shouldCollapseAuxTabs(
 /**
  * Decide which aux-panel tabs are available and which to actually show.
  *
- * The folder-scoped tabs (files/changes/commits) only make sense with a real
- * folder workspace open, so chat sessions and the folderless state collapse to
- * just the Session Details tab. `effectiveTab` keeps the rendered selection
- * valid even when the stored `activeTab` is a now-hidden folder tab, avoiding a
+ * The repository tabs (files/changes/commits) only make sense with a real
+ * folder workspace open. Session Details and Browser remain available in chat
+ * sessions and the folderless state. `effectiveTab` keeps the rendered
+ * selection valid even when the stored `activeTab` is now hidden, avoiding a
  * one-frame flash before the reconciling effect corrects the stored value.
  */
 export function resolveAuxTabView(
@@ -107,14 +116,27 @@ export function resolveAuxTabView(
   const showFolderTabs = activeFolderId != null && !isChatMode
   return {
     showFolderTabs,
-    effectiveTab: showFolderTabs ? activeTab : "session_details",
+    effectiveTab:
+      showFolderTabs || !FOLDER_SCOPED_TABS.has(activeTab)
+        ? activeTab
+        : "session_details",
   }
+}
+
+export function resolveAvailableAuxTabs(
+  showFolderTabs: boolean
+): AuxPanelTab[] {
+  return TAB_ORDER.filter(
+    (tab) => !FOLDER_SCOPED_TABS.has(tab) || showFolderTabs
+  )
 }
 
 export function AuxPanel() {
   const t = useTranslations("Folder.auxPanel.tabs")
   const tDetails = useTranslations("Folder.sessionDetails")
-  const { isOpen, width, activeTab, setActiveTab } = useAuxPanelContext()
+  const tBrowser = useTranslations("BrowserSurface")
+  const { isOpen, width, activeTab, setActiveTab, setBrowserSessionOpen } =
+    useAuxPanelContext()
   const { activeFolderId } = useActiveFolder()
   const isChatMode = useIsActiveChatMode()
   const isMobile = useIsMobile()
@@ -163,7 +185,7 @@ export function AuxPanel() {
   // chat session), so other consumers of `activeTab` stay in sync with what's
   // shown. Done in an effect — never a render-time setState on the provider.
   useEffect(() => {
-    if (!showFolderTabs && activeTab !== "session_details") {
+    if (!showFolderTabs && FOLDER_SCOPED_TABS.has(activeTab)) {
       setActiveTab("session_details")
     }
   }, [showFolderTabs, activeTab, setActiveTab])
@@ -184,7 +206,6 @@ export function AuxPanel() {
   const rightReserve = rightChromeReserve(winLinuxControls, zoomLevel)
   const collapsed =
     !isMobile &&
-    showFolderTabs &&
     shouldCollapseAuxTabs(
       measuredWidth > 0 ? measuredWidth : width,
       rightReserve
@@ -194,9 +215,13 @@ export function AuxPanel() {
     (tab: AuxPanelTab) =>
       tab === "session_details"
         ? tDetails("menuLabel")
-        : t(FOLDER_TAB_LABEL_KEY[tab]),
-    [t, tDetails]
+        : tab === "browser"
+          ? tBrowser("tabLabel")
+          : t(FOLDER_TAB_LABEL_KEY[tab]),
+    [t, tBrowser, tDetails]
   )
+
+  const availableTabs = resolveAvailableAuxTabs(showFolderTabs)
 
   // Shared across the mobile underline row and the desktop segmented control.
   // `compact` overrides the base full-height, equal-flex trigger into a short,
@@ -205,9 +230,7 @@ export function AuxPanel() {
     const triggerClassName = compact
       ? "h-6 flex-none rounded-md px-2"
       : undefined
-    return TAB_ORDER.filter(
-      (tab) => tab === "session_details" || showFolderTabs
-    ).map((tab) => {
+    return availableTabs.map((tab) => {
       const Icon = TAB_ICONS[tab]
       const label = tabLabel(tab)
       return (
@@ -249,7 +272,7 @@ export function AuxPanel() {
             value={effectiveTab}
             onValueChange={handleTabValueChange}
           >
-            {TAB_ORDER.map((tab) => {
+            {availableTabs.map((tab) => {
               const Icon = TAB_ICONS[tab]
               return (
                 <DropdownMenuRadioItem key={tab} value={tab}>
@@ -303,14 +326,9 @@ export function AuxPanel() {
           // comfortable widths they clear each other; when the panel is too
           // narrow for the control to stay left of that overlay, it collapses
           // into a single dropdown picker (see `collapsed`). The strip is
-          // always h-10 (reserving the overlay's height); when Session Details
-          // is the only tab (chat / folderless) the control is `hidden`
-          // (display:none) — that drops the lone trigger out of the tab order
-          // (unlike `sr-only`, which stays keyboard
-          // focusable and would trap Tab on an invisible control) while the
-          // TabsContent's aria-labelledby still resolves the panel's name from
-          // the directly-referenced hidden trigger, so it stays labelled without
-          // showing a pointless single-tab control.
+          // always h-10 (reserving the overlay's height). Chat and folderless
+          // contexts still show Session Details + Browser; repository tabs are
+          // added only for a real folder workspace.
           <div className="flex h-10 shrink-0 items-center gap-2 bg-muted ws-transparent-bg ws-strip-line pl-3 pr-2">
             {/* Off-image `bg-muted` matches the conversation/file strips +
                 bottom StatusBar. With a workspace background image on, the
@@ -334,7 +352,7 @@ export function AuxPanel() {
               variant="default"
               className={cn(
                 "h-7 gap-0.5 rounded-lg bg-foreground/[0.06] p-0.5 group-data-horizontal/tabs:h-7",
-                (!showFolderTabs || collapsed) && "hidden"
+                collapsed && "hidden"
               )}
             >
               {renderTabTriggers(true)}
@@ -372,6 +390,24 @@ export function AuxPanel() {
           className="mt-0 flex-1 min-h-0 overflow-hidden"
         >
           {mountedTabs.has("git_log") ? <GitLogTab /> : null}
+        </TabsContent>
+        <TabsContent
+          value="browser"
+          forceMount
+          className="mt-0 flex-1 min-h-0 overflow-hidden"
+        >
+          {mountedTabs.has("browser") ? (
+            <AuxPanelBrowserTab
+              visible={isOpen && effectiveTab === "browser"}
+              onSessionAttached={(connectionId) =>
+                setBrowserSessionOpen(connectionId, true)
+              }
+              onExplicitClose={(connectionId) => {
+                setBrowserSessionOpen(connectionId, false)
+                setActiveTab("session_details")
+              }}
+            />
+          ) : null}
         </TabsContent>
       </Tabs>
     </aside>
